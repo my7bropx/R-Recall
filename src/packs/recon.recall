@@ -1,0 +1,112 @@
+;; Network and OSINT reconnaissance.
+
+%tool nmap
+%cat command
+%tags recon,scanning
+
+@ Quick top-1000-ports scan || nmap {{target}}
+~ quick
+
+@ Full TCP port sweep || nmap -p- -T4 {{target}}
+~ allports
+? every port full range scan
+
+@ Service + version detection with default scripts || nmap -sC -sV -p {{ports:-}} {{target}} -oA {{outfile:scan}}
+~ enum,version
+? thorough scan save output all formats
+
+@ Fast ping sweep across a subnet || nmap -sn -T4 {{subnet}}
+~ discovery
+? host discovery which ips are up
+
+@ UDP scan of common ports (slow — narrow the port list) || nmap -sU --top-ports 50 {{target}}
+~ udp
+
+@ Stealth SYN scan, no ping first (offline/filtered hosts) || sudo nmap -sS -Pn {{target}}
+~ stealth
+
+@ Run vulnerability-category NSE scripts || nmap --script vuln {{target}}
+~ nse,vuln
+? nmap scripting engine known cves
+
+@ Scan targets from a file, all ports, to greppable output || nmap -iL {{targets_file}} -p- -oG {{outfile:scan}}.gnmap
+~ batch
+
+@ Evade a naive IDS: slow timing, fragmented, decoys || sudo nmap -T0 -f -D {{decoy1}},{{decoy2}},ME {{target}}
+~ evasion
+
+%tool masscan
+%tags recon,scanning,fast
+
+@ Scan every port on a huge range fast || sudo masscan -p1-65535 {{subnet}} --rate {{rate:1000}}
+~ allports,fast
+? internet scale port scan much faster than nmap
+Follow up with `nmap -sV -p<found-ports>` for service detail — masscan only tells you what's open, not what's running.
+
+%tool whois
+%tags recon,osint
+
+@ Domain registration lookup || whois {{domain}}
+~ domain
+
+@ IP allocation / ASN lookup || whois {{target}}
+~ ip,asn
+
+%tool dig
+%tags recon,dns
+
+@ Basic A record lookup || dig {{domain}}
+~ dns
+
+@ Attempt a zone transfer || dig axfr {{domain}} @{{nameserver}}
+~ axfr,misconfig
+? dns zone transfer test often disabled but worth checking
+
+@ Reverse DNS lookup || dig -x {{target}}
+~ ptr
+
+@ Query a specific record type || dig {{domain}} {{type:MX}}
+~ records
+
+%tool host
+@ Quick hostname → IP resolution || host {{domain}}
+~ dns
+
+%tool theharvester
+%tags osint,recon
+
+@ Gather emails/subdomains/hosts from public sources || theHarvester -d {{domain}} -b all -l 200
+~ emails,subdomains
+? osint passive recon email harvesting
+
+%tool amass
+%tags osint,subdomains
+
+@ Passive subdomain enumeration || amass enum -passive -d {{domain}}
+~ passive
+
+@ Active enumeration (resolves + brute-forces) || amass enum -active -d {{domain}} -brute
+~ active
+
+%tool subfinder
+%tags osint,subdomains
+
+@ Fast passive subdomain discovery || subfinder -d {{domain}} -o subdomains.txt
+~ passive
+
+%tool httpx
+%tags web,probing
+
+@ Probe a list of hosts for live web servers || httpx -l subdomains.txt -status-code -title -tech-detect
+~ probe
+? which subdomains are alive http
+
+%tool dnsenum
+%tags dns,recon
+
+@ DNS enumeration sweep (records, brute, zone transfer attempt) || dnsenum {{domain}}
+~ enum
+
+%tool dnsrecon
+@ General-purpose DNS recon with a wordlist || dnsrecon -d {{domain}} -D {{wordlist}} -t brt
+~ bruteforce

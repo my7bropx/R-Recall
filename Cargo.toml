@@ -1,0 +1,28 @@
+[package]
+name = "recall"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal knowledge base with Vim keys and FTS5 full-text search"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.28"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# ── Optional MSRV fallback ──────────────────────────────────────────────
+# The versions above build on a current toolchain (tested target: your Kali
+# rustc). If you ever build on an OLD rustc (~1.75) you'll hit MSRV / edition2024
+# errors from newer transitive patch releases. In that case, swap the clap line
+# for `clap = { version = "=4.5.20", features = ["derive"] }`, pin
+# `rusqlite = { version = "=0.31.0", features = ["bundled"] }`, and add:
+#   instability = "=0.3.1"
+#   unicode-segmentation = "=1.12.0"
+# That exact set was verified to compile and run on rustc 1.75.0.
+
+[profile.release]
+lto = true
+strip = true

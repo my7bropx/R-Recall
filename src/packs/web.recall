@@ -1,0 +1,116 @@
+;; Web application testing: content discovery, CMS scanning, injection tools.
+
+%tool gobuster
+%cat command
+%tags web,discovery
+
+@ Directory / file brute-force || gobuster dir -u {{url}} -w {{wordlist:/usr/share/wordlists/dirb/common.txt}} -x php,html,txt -t 50
+~ dirbusting
+? content discovery hidden paths
+
+@ Subdomain brute-force (DNS mode) || gobuster dns -d {{domain}} -w {{wordlist}} -t 50
+~ subdomains
+
+@ Virtual-host brute-force || gobuster vhost -u {{url}} -w {{wordlist}} --append-domain
+~ vhosts
+
+%tool ffuf
+%tags web,discovery
+
+@ Directory fuzzing with status filtering || ffuf -u {{url}}/FUZZ -w {{wordlist:/usr/share/wordlists/dirb/common.txt}} -mc 200,204,301,302,307,401,403
+~ dirbusting
+
+@ Parameter value fuzzing || ffuf -u '{{url}}?FUZZ={{value}}' -w {{wordlist}} -fs {{baseline_size}}
+~ params
+? fuzz GET parameter names or values, filter by response size
+
+@ POST body fuzzing || ffuf -u {{url}} -X POST -d 'user=FUZZ&pass={{pass}}' -H 'Content-Type: application/x-www-form-urlencoded' -w {{wordlist}} -fc 401
+~ post
+
+@ Virtual-host fuzzing via the Host header || ffuf -u {{url}} -H 'Host: FUZZ.{{domain}}' -w {{wordlist}} -fs {{baseline_size}}
+~ vhosts
+
+%tool feroxbuster
+%tags web,discovery
+
+@ Recursive content discovery || feroxbuster -u {{url}} -w {{wordlist:/usr/share/wordlists/dirb/common.txt}}
+~ dirbusting
+? recursive brute force like gobuster but auto-recurses
+
+@ Quiet run, only report 200s, save to file || feroxbuster -u {{url}} -w {{wordlist}} -s 200 -q -o results.txt
+~ report
+
+@ Force browse through a proxy (Burp) || feroxbuster -u {{url}} -w {{wordlist}} --burp
+~ proxy
+
+%tool wpscan
+%tags web,cms,wordpress
+
+@ Enumerate plugins, themes and users || wpscan --url {{url}} --enumerate vp,vt,u
+~ enum
+? wordpress scan vulnerable plugins
+
+@ Enumerate with a vulnerability API token (CVE data) || wpscan --url {{url}} --enumerate vp --api-token {{api_token}}
+~ vulns
+
+@ Password-brute a known username list || wpscan --url {{url}} --usernames {{userlist}} --passwords {{wordlist}}
+~ bruteforce
+
+%tool nikto
+%tags web,scanner
+
+@ General web server scan || nikto -h {{url}}
+~ scan
+? vulnerability scan default files outdated software
+
+@ Scan through a proxy with a specific port || nikto -h {{target}} -p {{port:443}} -ssl -useproxy http://127.0.0.1:8080
+~ proxy
+
+%tool sqlmap
+%tags web,sqli
+
+@ Test a URL parameter for SQL injection || sqlmap -u '{{url}}?id=1' --batch
+~ inject
+? automated sql injection detection
+
+@ Test a captured request file (from Burp) || sqlmap -r {{request_file}} --batch --level 3 --risk 2
+~ request
+
+@ Dump a specific database once injection is confirmed || sqlmap -u '{{url}}?id=1' -D {{db_name}} --dump
+~ dump
+! exfiltrates database contents — scope and get sign-off first
+
+@ Get an OS shell through the injection || sqlmap -u '{{url}}?id=1' --os-shell
+~ shell
+! attempts to execute OS commands on the database server
+
+%tool wfuzz
+%tags web,fuzzing
+
+@ Basic fuzz with a wordlist, hide a response size || wfuzz -c -z file,{{wordlist}} --hh {{hide_size}} {{url}}/FUZZ
+~ dirbusting
+
+@ Fuzz a login form for valid creds || wfuzz -c -z file,{{userlist}} -z file,{{wordlist}} -d 'user=FUZZ&pass=FUZ2Z' --hc 401 {{url}}
+~ bruteforce
+
+%tool whatweb
+%tags web,fingerprint
+
+@ Fingerprint the tech stack of a site || whatweb -a 3 {{url}}
+~ recon
+? identify cms framework server headers
+
+%tool dirb
+%tags web,discovery,legacy
+
+@ Classic recursive directory brute-force || dirb {{url}} {{wordlist:/usr/share/wordlists/dirb/common.txt}}
+~ dirbusting
+Slower than gobuster/ffuf but recurses by default and needs no flags to get started.
+
+%tool burpsuite
+%cat tool
+%tags web,proxy
+
+@ Route traffic through Burp for manual testing || burpsuite &
+~ intercept
+Set the browser (or `curl -x http://127.0.0.1:8080 -k`) to proxy through `127.0.0.1:8080`, then Proxy → Intercept to capture and Repeater to replay. Export CA cert from `http://burpsuite` while proxied through it, for HTTPS interception without warnings.

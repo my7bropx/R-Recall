@@ -1,0 +1,105 @@
+;; Digital forensics and incident response.
+
+%tool volatility3
+%cat command
+%tags forensics,memory
+
+@ Identify the OS profile of a memory dump || python3 vol.py -f {{dumpfile}} windows.info
+~ profile
+? memory forensics identify os version
+Volatility 3 auto-detects the profile — no `imageinfo`/`kdbgscan` step needed like Vol2.
+
+@ List running processes || python3 vol.py -f {{dumpfile}} windows.pslist
+~ processes
+
+@ Process tree (parent/child) || python3 vol.py -f {{dumpfile}} windows.pstree
+~ processtree
+
+@ Dump a process's memory || python3 vol.py -f {{dumpfile}} -o out/ windows.memmap --pid {{pid}} --dump
+~ dump
+
+@ Extract cached credential hashes || python3 vol.py -f {{dumpfile}} windows.hashdump
+~ hashdump
+! extracts credential material from the memory image
+
+@ List network connections at capture time || python3 vol.py -f {{dumpfile}} windows.netscan
+~ network
+
+@ Command-line history of each process || python3 vol.py -f {{dumpfile}} windows.cmdline
+~ cmdline
+
+@ Linux equivalents (process list on a Linux dump) || python3 vol.py -f {{dumpfile}} linux.pslist
+~ linux
+
+%tool binwalk
+%tags forensics,carving,firmware
+
+@ Identify embedded files/filesystems in a blob || binwalk {{file}}
+~ identify
+? firmware analysis embedded files
+
+@ Extract everything it recognizes || binwalk -e {{file}}
+~ extract
+
+@ Carve entropy-dense regions (encrypted/compressed) || binwalk -E {{file}}
+~ entropy
+
+%tool foremost
+%tags forensics,carving
+
+@ Carve files by signature from a disk image || foremost -i {{image.dd}} -o {{outdir}}
+~ carve
+? file recovery deleted files signature
+
+%tool exiftool
+%tags forensics,metadata
+
+@ Dump all metadata from a file || exiftool {{file}}
+~ metadata
+? gps location camera exif hidden data
+
+@ Strip all metadata || exiftool -all= {{file}}
+~ strip
+
+@ Recursively pull GPS coordinates from a folder of images || exiftool -gps:all -r {{directory}}
+~ gps
+
+%tool strings
+%cat command
+%tags forensics,binary
+
+@ Pull printable strings from a binary || strings {{file}} | less
+~ extract
+? readable text in binary find hardcoded
+
+@ Only strings of a minimum length, with file offsets || strings -n 8 -t x {{file}}
+~ offsets
+
+%tool steghide
+%tags forensics,steganography
+
+@ Extract hidden data from an image (with passphrase) || steghide extract -sf {{image.jpg}}
+~ extract
+? steganography hidden file in image
+
+@ Show whether a file even has embedded data || steghide info {{image.jpg}}
+~ info
+
+%tool dd
+%cat command
+%tags forensics,imaging
+
+@ Image a disk to a file (never write TO the source disk) || dd if={{source_device}} of={{image.dd}} bs=4M status=progress conv=noerror,sync
+~ imaging
+? forensic disk image bit for bit copy
+`if=` is the read side — double-check it before running; swapping `if=`/`of=` is the classic way to destroy the evidence disk instead of copying it.
+
+@ Hash the image for chain-of-custody || sha256sum {{image.dd}} | tee {{image.dd}}.sha256
+~ hash,chainofcustody
+
+%tool losetup
+%tags forensics,mounting
+
+@ Mount a raw disk image read-only for examination || sudo losetup -Pf --show -r {{image.dd}}
+~ mount
+Then `sudo mount -o ro /dev/loopXpN {{mountpoint}}` on the partition losetup reports. `-r` keeps it read-only so nothing touches the evidence.

@@ -1,0 +1,282 @@
+;; Core Linux administration: services, disks, packages, processes, archives.
+
+%tool systemctl
+%cat command
+%tags linux,systemd
+
+@ Check a service's status || systemctl status {{service}}
+~ status
+
+@ Start / enable a service at boot || sudo systemctl enable --now {{service}}
+~ enable
+
+@ Restart a service after a config change || sudo systemctl restart {{service}}
+~ restart
+
+@ List all failed units || systemctl --failed
+~ failed
+? what services crashed on boot
+
+@ List every unit and its state || systemctl list-units --type=service --all
+~ list
+
+%tool journalctl
+%tags linux,systemd,logs
+
+@ Follow the live system log || journalctl -f
+~ follow
+
+@ Logs for one service since last boot || journalctl -u {{service}} -b
+~ service
+
+@ Logs in a time window || journalctl --since "{{start:1 hour ago}}" --until "{{end:now}}"
+~ timerange
+
+@ Only errors and worse, across everything || journalctl -p err -b
+~ errors
+
+%tool crontab
+%cat command
+%tags linux,scheduling
+
+@ Edit your own crontab || crontab -e
+~ edit
+
+@ List your scheduled jobs || crontab -l
+~ list
+
+@ Every 5 minutes, syntax reference || */5 * * * * {{command}}
+~ syntax
+`min hour day month weekday command` — `*` means "every", `*/5` means "every 5 units". System-wide jobs also live in `/etc/cron.d/`, `/etc/cron.{hourly,daily,weekly}/`.
+
+%tool find
+%cat command
+%tags linux,filesystem
+
+@ Find by name (case-insensitive) under a path || find {{path:.}} -iname '{{pattern}}'
+~ name
+
+@ Find files modified in the last N minutes || find {{path:.}} -mmin -{{minutes:10}}
+~ recent
+? recently changed files timeline
+
+@ Find and act on each match || find {{path:.}} -name '{{pattern}}' -exec {{command}} {} \;
+~ exec
+
+@ Find files over a given size || find {{path:.}} -size +{{size:100M}}
+~ size
+
+%tool xargs
+%tags linux,pipelines
+
+@ Feed found files into another command safely (handles spaces) || find {{path:.}} -name '{{pattern}}' -print0 | xargs -0 {{command}}
+~ safe
+
+@ Run in parallel || cat {{list.txt}} | xargs -P {{jobs:4}} -I{} {{command}} {}
+~ parallel
+
+%tool ps
+%cat command
+%tags linux,processes
+
+@ Full process list with args, tree-friendly || ps auxf
+~ list
+
+@ Find a process by name || ps aux | grep {{name}}
+~ search
+
+%tool kill
+@ Terminate a process by PID (graceful, then forceful) || kill {{pid}}
+~ terminate
+Escalate with `kill -9 {{pid}}` only if the graceful `SIGTERM` (the plain `kill`) doesn't work — `-9`/`SIGKILL` skips cleanup handlers.
+
+%tool lsof
+%cat command
+%tags linux,processes
+
+@ What process is holding a port open || sudo lsof -i :{{port}}
+~ ports
+
+@ What files a process has open || lsof -p {{pid}}
+~ files
+
+;; ── Disks, filesystems, encryption ───────────────────────────────────────
+
+%tool lsblk
+%cat command
+%tags linux,disks
+
+@ Tree view of block devices and mountpoints || lsblk -f
+~ list
+? what disks and partitions exist
+
+%tool fdisk
+%tags linux,disks,partitioning
+
+@ List partitions on a disk || sudo fdisk -l {{device:/dev/sda}}
+~ list
+
+@ Interactive partition editor || sudo fdisk {{device}}
+~ edit
+! writes a new partition table if you save — triple-check the device path first
+
+%tool parted
+@ Show a disk's partition table (works on GPT too) || sudo parted {{device}} print
+~ list
+
+%tool mount
+%cat command
+%tags linux,disks
+
+@ Mount a device || sudo mount {{device}} {{mountpoint}}
+~ mount
+
+@ Mount read-only (forensics, untrusted media) || sudo mount -o ro {{device}} {{mountpoint}}
+~ readonly
+
+%tool cryptsetup
+%tags linux,encryption,luks
+
+@ Open a LUKS volume || sudo cryptsetup luksOpen {{device}} {{mapper_name}}
+~ open
+? decrypt luks disk
+
+@ Check whether a device is LUKS-encrypted || sudo cryptsetup isLuks {{device}} && echo "yes"
+~ check
+
+@ Close (lock) a mapped volume || sudo cryptsetup luksClose {{mapper_name}}
+~ close
+
+%tool lvm
+%cat tool
+%tags linux,disks,lvm
+
+@ Show volume groups / logical volumes || sudo vgs && sudo lvs
+~ status
+? logical volume manager overview
+Activate an inactive VG after moving disks with `sudo vgchange -ay`; extend a filesystem after growing its LV with `sudo resize2fs {{lv_path}}` (ext4) or `sudo xfs_growfs {{mountpoint}}` (xfs).
+
+%tool mdadm
+%tags linux,disks,raid
+
+@ Show RAID array status || cat /proc/mdstat && sudo mdadm --detail {{array:/dev/md0}}
+~ status
+
+@ Reassemble an array after a disk shuffle/reboot rescue || sudo mdadm --assemble --scan
+~ assemble
+
+%tool zfs
+%cat command
+%tags linux,disks,zfs
+
+@ List pools and their health || zpool status
+~ status
+
+@ List datasets and usage || zfs list
+~ list
+
+@ Take / list a snapshot || sudo zfs snapshot {{pool}}/{{dataset}}@{{snap_name}} && zfs list -t snapshot
+~ snapshot
+
+%tool btrfs
+%tags linux,disks,btrfs
+
+@ Show filesystem usage (more accurate than df on btrfs) || sudo btrfs filesystem usage {{mountpoint}}
+~ usage
+
+@ List and create snapshots || sudo btrfs subvolume snapshot {{source}} {{dest}}
+~ snapshot
+
+;; ── Packages ──────────────────────────────────────────────────────────────
+
+%tool apt
+%cat command
+%tags linux,packages,debian
+
+@ Update indexes and upgrade everything || sudo apt update && sudo apt full-upgrade -y
+~ upgrade
+
+@ Search for a package || apt search {{name}}
+~ search
+
+@ Show what installed a file / what package owns it || dpkg -S {{path}}
+~ owns
+
+@ Hold a package at its current version || sudo apt-mark hold {{package}}
+~ hold
+
+%tool dpkg
+@ List installed packages || dpkg -l | grep {{name}}
+~ list
+
+;; ── Archives, transfer, misc ─────────────────────────────────────────────
+
+%tool tar
+%cat command
+%tags linux,archives
+
+@ Create a gzipped archive || tar czf {{out.tar.gz}} {{path}}
+~ create
+
+@ Extract || tar xzf {{archive.tar.gz}} -C {{destdir:.}}
+~ extract
+
+@ List contents without extracting || tar tzf {{archive.tar.gz}}
+~ list
+
+%tool rsync
+%cat command
+%tags linux,transfer
+
+@ Sync a local directory to a remote host over SSH || rsync -avz -e ssh {{source}}/ {{user}}@{{target}}:{{destpath}}
+~ remote
+? efficient copy resume incremental
+
+@ Local mirror, delete extras at the destination || rsync -av --delete {{source}}/ {{destpath}}/
+~ mirror
+! removes files at the destination that are not in the source
+
+@ Resume an interrupted transfer, show progress || rsync -avz --partial --progress {{source}} {{destpath}}
+~ resume
+
+%tool ffmpeg
+%cat command
+%tags media,conversion
+
+@ Convert between formats || ffmpeg -i {{input}} {{output}}
+~ convert
+
+@ Extract audio only || ffmpeg -i {{input.mp4}} -vn -acodec copy {{output.aac}}
+~ extract
+
+@ Compress video with a target quality (lower crf = better quality) || ffmpeg -i {{input}} -vcodec libx264 -crf {{crf:23}} {{output.mp4}}
+~ compress
+
+@ Screen-record an X11 display || ffmpeg -f x11grab -video_size {{size:1920x1080}} -i :0.0 {{output.mp4}}
+~ record
+
+%tool jq
+%cat command
+%tags data,json
+
+@ Pretty-print JSON || cat {{file.json}} | jq .
+~ pretty
+
+@ Extract a field from every element of an array || cat {{file.json}} | jq '.[].{{field}}'
+~ extract
+
+@ Filter objects matching a condition || cat {{file.json}} | jq '.[] | select(.{{field}} == "{{value}}")'
+~ filter
+
+%tool yq
+%cat command
+%tags data,yaml
+
+@ Pretty-print / convert YAML to JSON || yq -o=json {{file.yaml}}
+~ convert
+
+@ Read one field || yq '.{{field}}' {{file.yaml}}
+~ extract
+
+@ Edit a field in place || yq -i '.{{field}} = "{{value}}"' {{file.yaml}}
+~ edit

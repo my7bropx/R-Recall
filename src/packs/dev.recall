@@ -1,0 +1,210 @@
+;; Development workflow: git recovery, containers, infra, Rust, SSH/GPG.
+
+%tool git
+%cat command
+%tags dev,git
+
+@ Recover a "lost" commit after a reset (reflog) || git reflog
+~ recovery
+? undo git reset find lost commit
+Find the commit hash before the mistake, then `git reset --hard {{hash}}` or `git cherry-pick {{hash}}` to bring just that change back.
+
+@ Undo the last commit but keep the changes staged || git reset --soft HEAD~1
+~ undo
+
+@ Discard local changes to one file || git checkout -- {{file}}
+~ discard
+
+@ Stash work in progress, come back to it later || git stash push -m "{{message}}"
+~ stash
+`git stash list` to see them, `git stash pop` to reapply the most recent and drop it, `git stash apply stash@{{{n}}}` to reapply without dropping.
+
+@ Interactive rebase to clean up the last N commits || git rebase -i HEAD~{{n:5}}
+~ rebase
+
+@ Find which commit introduced a bug || git bisect start && git bisect bad && git bisect good {{known_good_commit}}
+~ bisect
+Git checks out a midpoint each step; mark it `git bisect good` or `git bisect bad` until it names the culprit, then `git bisect reset`.
+
+@ Apply a commit from another branch without merging || git cherry-pick {{commit_hash}}
+~ cherrypick
+
+@ See what changed in a specific commit || git show {{commit_hash}}
+~ inspect
+
+@ Force-push safely (fails if the remote moved) || git push --force-with-lease
+~ force
+! rewrites remote history — coordinate with anyone else on the branch first
+
+@ Remove a file from history entirely (secrets leak) || git filter-repo --path {{file}} --invert-paths
+~ purge
+! rewrites the whole repo history — everyone must re-clone afterward
+
+%tool gh
+%cat command
+%tags dev,github
+
+@ Create a PR from the current branch || gh pr create --fill
+~ pr
+
+@ Check out someone else's PR locally || gh pr checkout {{pr_number}}
+~ checkout
+
+@ View CI status for the current branch || gh pr checks
+~ ci
+
+;; ── Containers / infra ────────────────────────────────────────────────────
+
+%tool docker
+%cat command
+%tags dev,containers
+
+@ Shell into a running container || docker exec -it {{container}} /bin/bash
+~ shell
+
+@ Follow logs || docker logs -f {{container}}
+~ logs
+
+@ Reclaim disk space from stopped containers / dangling images || docker system prune -a
+~ cleanup
+! deletes every stopped container and unused image — nothing running is affected, but nothing stopped survives
+
+%tool podman
+%cat command
+%tags dev,containers
+
+@ Run a rootless container (Docker-compatible CLI) || podman run -it --rm {{image}}
+~ run
+? docker alternative rootless
+
+@ Generate a systemd unit for a container (auto-start) || podman generate systemd --new --files --name {{container}}
+~ systemd
+
+%tool kubectl
+%cat command
+%tags dev,kubernetes
+
+@ See what's running and its status || kubectl get pods -A
+~ status
+
+@ Tail logs from a pod || kubectl logs -f {{pod}} -n {{namespace:default}}
+~ logs
+
+@ Shell into a container in a pod || kubectl exec -it {{pod}} -n {{namespace:default}} -- /bin/sh
+~ shell
+
+@ Port-forward a pod to your machine || kubectl port-forward {{pod}} {{local_port}}:{{remote_port}} -n {{namespace:default}}
+~ portforward
+
+@ Describe a resource (events, status, why it's failing) || kubectl describe pod {{pod}} -n {{namespace:default}}
+~ debug
+
+%tool terraform
+%cat command
+%tags dev,infra
+
+@ Preview changes before applying || terraform plan
+~ plan
+
+@ Apply (asks for confirmation) || terraform apply
+~ apply
+
+@ Tear everything down (asks for confirmation) || terraform destroy
+~ destroy
+! destroys every resource this state file manages
+
+@ Import an existing resource into state || terraform import {{resource_address}} {{resource_id}}
+~ import
+
+;; ── Rust ──────────────────────────────────────────────────────────────────
+
+%tool cargo
+%cat command
+%tags dev,rust
+
+@ New binary / library project || cargo new {{name}}
+~ new
+
+@ Build (debug / release) || cargo build --release
+~ build
+
+@ Run with args passed through || cargo run -- {{args}}
+~ run
+
+@ Run tests (one thread — deterministic output) || cargo test -- --test-threads=1
+~ test
+
+@ Watch and re-run on save (needs cargo-watch) || cargo watch -x run
+~ watch
+
+@ Lint || cargo clippy --all-targets -- -D warnings
+~ lint
+
+@ Format the whole project || cargo fmt --all
+~ format
+
+@ Update dependencies within semver, refresh the lockfile || cargo update
+~ update
+
+@ Add a dependency without editing Cargo.toml by hand || cargo add {{crate}}
+~ deps
+
+@ See why a crate is pulled in (dependency tree) || cargo tree -i {{crate}}
+~ tree
+
+%tool rustup
+%tags dev,rust
+
+@ Install / switch the default toolchain || rustup default {{toolchain:stable}}
+~ toolchain
+
+@ Add a cross-compilation target || rustup target add {{target_triple}}
+~ target
+
+@ Update all installed toolchains || rustup update
+~ update
+
+;; ── SSH, GPG, tmux extras ────────────────────────────────────────────────
+
+%tool ssh
+%cat command
+%tags dev,ssh
+
+@ Copy your public key to a remote host || ssh-copy-id {{user}}@{{target}}
+~ keys
+
+@ Connect through a jump host in one command || ssh -J {{jumphost}} {{user}}@{{target}}
+~ jumphost
+
+@ Local port forward (reach a remote-only service) || ssh -L {{local_port}}:{{remote_host}}:{{remote_port}} {{user}}@{{target}}
+~ portforward
+
+%tool ssh-keygen
+@ Generate a modern ed25519 keypair || ssh-keygen -t ed25519 -C "{{comment}}"
+~ generate
+
+%tool gpg
+%cat command
+%tags dev,encryption
+
+@ Encrypt a file for a recipient's public key || gpg -e -r {{recipient}} {{file}}
+~ encrypt
+
+@ Decrypt || gpg -d {{file.gpg}} > {{outfile}}
+~ decrypt
+
+@ Sign a file (detached signature) || gpg --detach-sign {{file}}
+~ sign
+
+%tool tmux
+%cat command
+%tags dev,terminal
+
+@ New named session (survives disconnects — great over SSH) || tmux new -s {{name}}
+~ session
+
+@ Reattach to a running session || tmux attach -t {{name}}
+~ attach
+
+@ List sessions from outside tmux || tmux ls
+~ list
