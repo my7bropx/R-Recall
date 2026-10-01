@@ -7,8 +7,10 @@ mod dedupe;
 mod derive;
 mod fill;
 mod import;
+mod mdscan;
 mod models;
 mod pack;
+mod pairs;
 mod pick;
 mod query;
 mod theme;
@@ -171,11 +173,12 @@ enum Commands {
         #[arg(long, default_value_t = 5)]
         show: usize,
     },
-    /// Import entries from a Markdown file (heading-aware: ## / ### / #### become entries)
+    /// Import entries from a Markdown/notes file (every heading becomes an entry;
+    /// code fences, page headers and converter debris are handled — see the README)
     Import {
         /// Path to the Markdown file
         path: PathBuf,
-        /// Parse and report counts without writing to the database
+        /// Parse and report what the importer did, without writing to the database
         #[arg(long)]
         dry_run: bool,
         /// Only import entries flagged CRITICAL or IMPORTANT
@@ -184,6 +187,11 @@ enum Commands {
         /// Extra tag to attach to every imported entry (repeatable)
         #[arg(long = "tag")]
         tag: Vec<String>,
+        /// Also store each annotated command (`# what it does` above it, a
+        /// `- `cmd` - description` bullet, a table row, a key table) as its own
+        /// entry, so `recall cmd` prints one command instead of a whole section
+        #[arg(long)]
+        per_command: bool,
     },
     /// The built-in knowledge pack (curated tool/command reference)
     Pack {
@@ -362,14 +370,15 @@ fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Import { path, dry_run, flagged_only, tag }) => {
-            let opts = import::ImportOptions { dry_run, flagged_only, extra_tags: tag };
+        Some(Commands::Import { path, dry_run, flagged_only, tag, per_command }) => {
+            let opts = import::ImportOptions { dry_run, flagged_only, extra_tags: tag, per_command };
             let stats = import::import_markdown(&mut db, &path, &opts)?;
             let verb = if dry_run { "Would import" } else { "Imported" };
             println!(
                 "{} {} entries ({} skipped, {} duplicates) from {}",
                 verb, stats.candidates, stats.skipped, stats.duplicates, path.display()
             );
+            println!("{}", stats.report.render());
         }
 
         None => {
@@ -441,7 +450,7 @@ fn open_external_editor(
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
 
-    let editor   = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+    let editor   = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
     let tmp_path = std::env::temp_dir().join("recall_content_edit.tmp");
     std::fs::write(&tmp_path, &app.form.content).ok();
     std::process::Command::new(&editor).arg(&tmp_path).status().ok();

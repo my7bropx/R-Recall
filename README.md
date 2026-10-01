@@ -390,36 +390,105 @@ stale and never needs a manual reindex.
 
 ## Importing Markdown
 
-`recall import <file.md>` turns a heading-organised Markdown file into entries.
+`recall import <file.md>` turns a notes file into entries. It is built for
+real, messy files — several documents pasted together, chat exports, PDF
+dumps — so every decision is a named rule, and the run prints how often each
+one fired.
 
 ```sh
 recall import MASTER.md                 # import everything (skips duplicates)
-recall import MASTER.md --dry-run       # report counts, write nothing
+recall import MASTER.md --dry-run       # parse and report, write nothing
 recall import MASTER.md --flagged-only  # only CRITICAL / IMPORTANT sections
 recall import MASTER.md --tag master    # attach an extra tag to every entry
+recall import MASTER.md --per-command   # also one entry per annotated command (below)
 ```
 
-How it parses:
+```
+Imported 2710 entries (701 skipped, 0 duplicates) from MASTER.md
+  headings   3,469 found (100 plain-text like "3️⃣ Title" / "Step 4 — Title"); 4 list items …
+  cleaned    416 page header/footer lines removed, 6 ```markdown wrappers unwrapped, …
+  entries    1,812 command · 893 note · 5 tool — tool identified on 1,532
+  shaped     255 titles made unique with their parent heading, 69 repeated sections dropped …
+```
 
-* Real headings are **2–4 hashes** (`##`, `###`, `####`); each becomes one
-  entry. A single `#` is a shell comment or a section banner and never starts an
-  entry — so `# comment` lines inside code blocks stay as body text.
-* An entry's body is everything from its heading to the next heading. Pure
-  containers (no body of their own) are dropped; their children become entries.
-* Category is inferred: fenced code or command-like lines → `command`, tool /
-  framework / install sections → `tool`, otherwise → `note`.
-* Tags come from the section context, plus `critical` / `important` when the
-  heading is flagged, plus any `--tag` you pass.
-* `tool` is inferred from the entry's first real command line (wrappers like
-  `sudo`/`env FOO=bar` are looked past; code fences in languages other than a
-  shell — `python`, `lua`, a bare fence of prose — are not mistaken for
-  commands), and a command that looks destructive is flagged automatically.
+**Where entries start and end.** An entry is a heading plus the text up to the
+next heading of any level; a heading with no body of its own is a container and
+its children become the entries.
 
-**De-duplication:** import never stores data that already exists (same title +
-content), and never stores the same entry twice within one run — so importing
-the same file repeatedly is a no-op. The same heading-aware parser works on
-any similarly-structured Markdown, not just one particular file — point it at
-any cheat sheet.
+* Headings are `#` to `######`, `# ====` / `# TITLE` / `# ====` banners, and
+  plain-text ones such as `3️⃣ Strong passphrase` or `Step 14 — Scan files` (these
+  count once they clearly head a body; a run of numbered lines with nothing
+  under them stays a list).
+* Code fences are paired the way a person reads them, so one bad fence can't
+  turn the rest of the file into "code": a ```` ```markdown ```` wrapper is
+  unwrapped, a stray fence is dropped, an unclosed block is closed where it
+  visibly ends. A `#` line inside code is a comment. Outside code it is a
+  heading — unless it sits in a run of commands or comments (an unfenced
+  script).
+* A "heading" a converter made out of a list or table item (`Good systems
+  use:` / `## PBKDF2`) is turned back into a list item.
+* Page furniture from a printed web page or chat (a date/title header and a
+  URL + `6/103` footer, repeated on every page) is removed, and the printed
+  title is kept as context. Link-only tables of contents are dropped; a
+  "Quick Reference Card" with a cheat sheet in it is not.
+* A section longer than ~6,000 characters is split at paragraph breaks (never
+  inside a code block) into `Title (1/3)`, `(2/3)`, … instead of being truncated.
+
+**Titles.** Markup, emoji and numbering (`3.1`, `2)`, `1️⃣`, and a bare `2 …`
+when its siblings count 1, 2, 3) are stripped. A generic title (`Examples`,
+`Best Practices`) or one shared by several entries is prefixed with its parent
+heading — `Docker — Best Practices` — and only entries that are still identical
+get a `(2)`. The same section pasted twice is stored once.
+
+**Category, tool, command.**
+
+* `command` — the body has a fenced shell (or `vim` / `tmux` / `awk`) block in
+  which some line would be typed (so `cd ~` and `source ~/.bashrc` count, while
+  an ssh config — `Host myserver`, `Port 22` — or a block of only comments does
+  not); or a key table in a vim/tmux section (`dd   delete line`); or command
+  lines make up a real share of it (a quarter of the text, or three lines) —
+  unfenced, or as `` - `cmd` - description `` bullets and table rows. A stray
+  `cat`/`sudo` line in an essay does not. Code in other languages (`python`,
+  `yaml`, …) and a bare fence used as a text box are notes.
+* `tool` — a heading that names the program (`nmap (Port Scanning)`, `# awk`),
+  else the program that most of the entry's commands run (every stage of a
+  pipeline counts; `echo`/`cat` only win alone), else empty. It never falls back
+  to "whatever came first", and keybindings (`C-h`), `EOF` and config
+  directives (`Host myserver`) are never programs. Which words count as
+  programs is learned from the file's own shell blocks.
+* `tool` (category) — a heading about tools/frameworks/suites with no command in it.
+* A command that looks destructive is flagged, checking every block.
+
+**Per-command entries (`--per-command`).** Cheat sheets annotate every command
+with what it does — and those words are what you type when searching. With this
+flag each annotated command also becomes an entry of its own, next to its
+section: the title is the description, `command` is that one command, and the
+tool, tags and danger flag are worked out for it alone. Recognised forms:
+
+```text
+# List files with details        ls -la    # List files with details      - `:noh` - Clear highlighting
+ls -la                                                                    | `dd` | Delete line |
+                                 Ctrl-b d   Detach      (vim/tmux key tables, `" comment` in ```vim blocks)
+```
+
+Options on their own (`-l`, `--show`), regex/glob notation (`*.log`, `[a-z]{2,}`),
+lone paths (`/etc/passwd`) and config directives are not commands and are skipped.
+An identical description + command in two places is stored once, and a section
+that already *is* the one command gets no duplicate. On a 62,000-line notes file
+this adds ~6,000 entries; `recall cmd` then prints a single copy-ready command
+for about two thirds of queries instead of a whole section (median 1 line, was 14),
+while finding the right entry stays about as good as before. It is off by default
+— sections alone are a smaller, quieter database — and the TUI's `:import` does not
+use it.
+
+**Tags and keywords.** Tags: the top-level banner (`linux`, `git`, `crypto` …),
+the section, `critical` / `important`, plus any `--tag`. Search keywords come
+from the heading path (`linux`, `file operations`), so a query can hit an
+entry through its context as well as its own title.
+
+**De-duplication.** Import never stores data that already exists (same title +
+content), so importing the same file repeatedly is a no-op, and the result for
+a given file is deterministic.
 
 ## Storage
 
