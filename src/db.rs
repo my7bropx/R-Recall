@@ -623,6 +623,38 @@ impl Database {
         Ok(())
     }
 
+    /// The entries from a given source (optionally only those carrying `tag`),
+    /// grouped by category — the dry-run report for `recall prune`.
+    pub fn source_breakdown(&self, source: Source, tag: Option<&str>) -> Result<Vec<(Category, i64)>> {
+        let mut sql = String::from("SELECT category, count(*) FROM entries WHERE source = ?1");
+        if tag.is_some() {
+            sql.push_str(" AND instr(',' || tags || ',', ?2) > 0");
+        }
+        sql.push_str(" GROUP BY category ORDER BY count(*) DESC, category");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let to_row = |r: &rusqlite::Row| Ok((Category::from_str(&r.get::<_, String>(0)?), r.get::<_, i64>(1)?));
+        let rows = match tag {
+            Some(t) => stmt.query_map(params![source.as_str(), format!(",{},", t)], to_row)?.collect::<rusqlite::Result<Vec<_>>>()?,
+            None => stmt.query_map(params![source.as_str()], to_row)?.collect::<rusqlite::Result<Vec<_>>>()?,
+        };
+        Ok(rows)
+    }
+
+    /// Delete every entry from `source` (optionally only those carrying `tag`), in
+    /// one statement. Returns how many were removed. The FTS index and pack
+    /// tombstones are kept in step by the table's own triggers, so a later
+    /// re-import behaves exactly as it would against a fresh database.
+    pub fn delete_by_source(&self, source: Source, tag: Option<&str>) -> Result<usize> {
+        let n = match tag {
+            Some(t) => self.conn.execute(
+                "DELETE FROM entries WHERE source = ?1 AND instr(',' || tags || ',', ?2) > 0",
+                params![source.as_str(), format!(",{},", t)],
+            )?,
+            None => self.conn.execute("DELETE FROM entries WHERE source = ?1", params![source.as_str()])?,
+        };
+        Ok(n)
+    }
+
     /// Count a use: bumps `uses` and stamps `last_used`, which feed ranking.
     pub fn record_use(&self, id: i64) -> Result<()> {
         self.conn.execute(
@@ -1661,6 +1693,36 @@ mod tests {
         assert_eq!(db.tool_counts(0).unwrap(), vec![("nmap".to_string(), 2)]);
         assert_eq!(db.tag_counts(0).unwrap()[0], ("web".to_string(), 2), "tags are counted case-insensitively");
         drop(db);
+        cleanup(&p);
+    }
+
+    #[test]
+    fn prune_removes_one_source_leaving_the_others_and_keeps_the_index_in_step() {
+        let (mut db, p) = tmp_db();
+        let imported = |title: &str, kw: &str, tags: &str| NewEntry {
+            source: Source::Import,
+            tags: tags.split(',').filter(|t| !t.is_empty()).map(str::to_string).collect(),
+            ..cmd(title, "nmap", "nmap -sV", kw)
+        };
+        db.add_new(&imported("Imported one", "zebraword", "linux,master")).unwrap();
+        db.add_new(&imported("Imported two", "", "linux")).unwrap();
+        db.add_new(&NewEntry { source: Source::User, ..cmd("Mine", "ls", "ls -la", "owlword") }).unwrap();
+
+        // dry-run breakdown sees only the import rows
+        assert_eq!(db.source_breakdown(Source::Import, None).unwrap(), vec![(Category::Command, 2)]);
+        assert_eq!(db.source_breakdown(Source::Import, Some("master")).unwrap(), vec![(Category::Command, 1)]);
+
+        // a tagged prune removes just that one; the other import and the user entry stay
+        assert_eq!(db.delete_by_source(Source::Import, Some("master")).unwrap(), 1);
+        assert_eq!(db.count().unwrap(), 2);
+        // the full prune leaves the hand-written entry alone
+        assert_eq!(db.delete_by_source(Source::Import, None).unwrap(), 1);
+        assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(db.get_all_entries().unwrap()[0].title, "Mine");
+
+        // the FTS index tracked the deletes: the removed words are gone, the kept one is not
+        assert!(db.search_ids("zebraword").unwrap().is_empty());
+        assert_eq!(db.search_ids("owlword").unwrap().len(), 1);
         cleanup(&p);
     }
 

@@ -187,11 +187,20 @@ enum Commands {
         /// Extra tag to attach to every imported entry (repeatable)
         #[arg(long = "tag")]
         tag: Vec<String>,
-        /// Also store each annotated command (`# what it does` above it, a
-        /// `- `cmd` - description` bullet, a table row, a key table) as its own
-        /// entry, so `recall cmd` prints one command instead of a whole section
+    },
+    /// Remove bulk-imported entries, keeping your own and the built-in pack
+    /// (reports only unless --apply; --apply backs up first). Use it to clear a
+    /// notes file before re-importing with a newer importer.
+    Prune {
+        /// Which entries to remove: import (default) | tldr | pack | user
+        #[arg(long, default_value = "import")]
+        source: String,
+        /// Only remove entries carrying this tag (e.g. a `--tag` used at import)
         #[arg(long)]
-        per_command: bool,
+        tag: Option<String>,
+        /// Actually delete. Without this, nothing is written.
+        #[arg(long)]
+        apply: bool,
     },
     /// The built-in knowledge pack (curated tool/command reference)
     Pack {
@@ -370,8 +379,16 @@ fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Import { path, dry_run, flagged_only, tag, per_command }) => {
-            let opts = import::ImportOptions { dry_run, flagged_only, extra_tags: tag, per_command };
+        Some(Commands::Prune { source, tag, apply }) => {
+            let Some(src) = models::Source::parse(&source) else {
+                eprintln!("Unknown --source '{}' (import | tldr | pack | user)", source);
+                std::process::exit(2);
+            };
+            cmds::prune(&mut db, src, tag.as_deref(), apply, paint)?;
+        }
+
+        Some(Commands::Import { path, dry_run, flagged_only, tag }) => {
+            let opts = import::ImportOptions { dry_run, flagged_only, extra_tags: tag };
             let stats = import::import_markdown(&mut db, &path, &opts)?;
             let verb = if dry_run { "Would import" } else { "Imported" };
             println!(

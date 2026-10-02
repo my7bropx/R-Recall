@@ -427,6 +427,43 @@ fn human_bytes(n: u64) -> String {
 
 // ─── backup / doctor ────────────────────────────────────────────────────────
 
+/// `recall prune` — remove bulk-imported entries (by default `src:import`),
+/// leaving your own hand-written entries and the built-in pack untouched. Reports
+/// only unless `--apply` is given, and `--apply` makes a timestamped backup first
+/// because the delete is permanent.
+pub fn prune(db: &mut Database, source: Source, tag: Option<&str>, apply: bool, paint: Paint) -> Result<()> {
+    let breakdown = db.source_breakdown(source, tag)?;
+    let total: i64 = breakdown.iter().map(|(_, n)| n).sum();
+    let what = match tag {
+        Some(t) => format!("{} entries tagged '{}'", source.as_str(), t),
+        None => format!("{} entries", source.as_str()),
+    };
+
+    if total == 0 {
+        println!("No {} to remove.", what);
+        return Ok(());
+    }
+
+    let parts: Vec<String> = breakdown.iter().map(|(c, n)| format!("{} {}", n, c.as_str())).collect();
+    let remaining = db.count()? - total;
+    println!(
+        "{} {} ({}) · {} would remain",
+        if apply { "Removing" } else { "Would remove" },
+        paint.bold(&total.to_string()),
+        parts.join(", "),
+        remaining,
+    );
+
+    if apply {
+        backup(db, None)?; // permanent delete — keep an escape hatch
+        let removed = db.delete_by_source(source, tag)?;
+        println!("Removed {} {}. Re-import with `recall import <file>` when ready.", removed, what);
+    } else {
+        println!("\nNothing was written. Re-run with --apply to delete (a backup is made first).");
+    }
+    Ok(())
+}
+
 pub fn backup(db: &Database, dest: Option<&Path>) -> Result<()> {
     let path = match dest {
         Some(p) => p.to_path_buf(),
