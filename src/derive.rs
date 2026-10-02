@@ -234,6 +234,12 @@ fn plausible_program(s: &str) -> bool {
         && !NOT_PROGRAMS.contains(&s)
 }
 
+/// Could this lower-case word name a program — `mimikatz`, `kali-tweaks` — rather
+/// than be an English word (`or`, `the`) or a keybinding?
+pub fn could_be_program(s: &str) -> bool {
+    looks_like_program(s) && plausible_program(s) && !STOPWORDS.contains(&s)
+}
+
 /// The set of programs a notes file is known to talk about: a built-in seed
 /// plus every program that starts a line in at least three different shell
 /// code blocks *of that file*. It is what lets the importer tell an unfenced

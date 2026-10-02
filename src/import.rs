@@ -13,14 +13,18 @@
 //!   3. Titles are cleaned (markup, numbering), and made meaningful and unique
 //!      with the *parent heading* ("Docker — Best Practices"), never with a
 //!      bare counter unless two entries are otherwise indistinguishable.
-//!   4. Category comes from what the body contains: a real command (fenced
-//!      shell, or unfenced lines that read as commands) → `command`; a section
-//!      about a tool with none → `tool`; everything else → `note`.
+//!   4. Category comes from what the section is (`categorize`): a profile of
+//!      one program — the heading names it and the body describes it — is a
+//!      `tool`; one that is mostly commands is a `command`; prose is a `note`,
+//!      even when it mentions a few commands along the way.
 //!   5. `tool` is the program the entry is about: named by the heading, else
 //!      the program most of its commands run, else empty — never "whatever
 //!      came first". Tags and search keywords come from the heading path.
 //!   6. A section too long to read as one entry is split at paragraph breaks
 //!      (never inside a code block), not silently truncated.
+//!
+//! One section is one entry: the commands in it are never copied out into
+//! entries of their own, so nothing in the database says the same thing twice.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -33,7 +37,7 @@ use crate::{
     derive::{self, Vocab},
     mdscan::{self, HeadKind},
     models::{fenced_blocks_lang, Category, NewEntry, Source},
-    pairs::{self, BlockKind, PairKind},
+    pairs::{self, BlockKind},
 };
 
 // The top-level banners -> short slug used as the primary tag / context.
@@ -58,8 +62,12 @@ const GENERIC: &[&str] = &[
     "additional resources", "additional tools", "advanced configuration",
     "pro tips", "tips & tricks",
 ];
-/// A heading naming one of these (and no command in the body) is a tool profile.
+/// A heading naming one of these (and no command in the body) is about tools.
 const TOOL_WORDS: &[&str] = &["tool", "tools", "toolkit", "framework", "suite", "utility", "utilities"];
+/// Prose that outweighs the commands in it this much — at least `PROSE_MIN` lines of
+/// it, more than `PROSE_PER_CMD` per command line — is an article, not a command entry.
+const PROSE_MIN: usize = 12;
+const PROSE_PER_CMD: usize = 3;
 const MAX_PART: usize = 6000; // a section longer than this is split at paragraph breaks
 const HARD_CAP: usize = 20000; // last resort: one block (e.g. a script) longer than this is truncated
 
@@ -67,9 +75,6 @@ pub struct ImportOptions {
     pub dry_run:      bool,
     pub flagged_only: bool,
     pub extra_tags:   Vec<String>,
-    /// Also store every annotated command (`# what it does` + command, a
-    /// `` - `cmd` - description `` bullet, a table row, a key table) as an entry of its own.
-    pub per_command:  bool,
 }
 
 pub struct ImportStats {
@@ -90,12 +95,12 @@ pub struct Report {
     pub notes:         usize,
     pub tools:         usize,
     pub with_tool:     usize,
+    /// Tool entries that are a profile of one program (the heading names it).
+    pub profiles:      usize,
+    /// Note entries that hold a few commands but are mostly prose.
+    pub prose_notes:   usize,
     pub qualified:     usize,
     pub repeats:       usize,
-    pub pairs_shell:   usize,
-    pub pairs_inline:  usize,
-    pub pairs_keys:    usize,
-    pub pair_repeats:  usize,
     pub split:         usize,
     pub truncated:     usize,
     pub median_chars:  usize,
@@ -142,12 +147,15 @@ impl Report {
             "  entries    {} command · {} note · {} tool — tool identified on {}",
             fmt_n(self.commands), fmt_n(self.notes), fmt_n(self.tools), fmt_n(self.with_tool)
         ));
-        let pairs = self.pairs_shell + self.pairs_inline + self.pairs_keys;
-        if pairs > 0 {
-            rows.push(format!(
-                "  per-command {} single-command entries (included above): {} from annotated shell blocks, {} from bullets/table rows, {} key bindings; {} repeats dropped",
-                fmt_n(pairs), fmt_n(self.pairs_shell), fmt_n(self.pairs_inline), fmt_n(self.pairs_keys), fmt_n(self.pair_repeats)
-            ));
+        let mut sorted: Vec<String> = Vec::new();
+        if self.profiles > 0 {
+            sorted.push(format!("{} program profiles filed as tool (the heading names the program)", fmt_n(self.profiles)));
+        }
+        if self.prose_notes > 0 {
+            sorted.push(format!("{} articles that only mention a few commands filed as note", fmt_n(self.prose_notes)));
+        }
+        if !sorted.is_empty() {
+            rows.push(format!("  sorted     {}", sorted.join(", ")));
         }
         let mut shaped: Vec<String> = Vec::new();
         if self.qualified > 0 {
@@ -507,11 +515,36 @@ struct Analysis {
     programs:    Vec<String>,
     fenced_cmd:  bool,
     unfenced:    usize,
-    /// `` - `cmd` - description `` bullets and table rows.
+    /// `` - `cmd` - description `` bullets and table rows whose code is a command.
     inline:      usize,
     text_lines:  usize,
+    /// Every line that would be typed: in command blocks, unfenced, and in bullets/tables.
+    cmd_lines:   usize,
+    /// How much prose there is outside code, in lines (see `prose_weight`).
+    prose:       usize,
     /// `vim` / `tmux` / `awk` fences (and key tables in a vim/tmux section) name their own tool.
     lang_tool:   Option<String>,
+}
+
+/// How much reading a line of text outside code is: nothing for a bare label
+/// (`**Examples:**`, `Basic scans:`), a rule or a table border; otherwise one
+/// line per ~100 characters, so a paragraph pasted as one line weighs what it reads like.
+fn prose_weight(line: &str) -> usize {
+    let t = line.replace("**", "");
+    let t = t.trim_start_matches(|c: char| matches!(c, '-' | '*' | '+' | '>' | '|' | '_') || c.is_whitespace()).trim();
+    if !t.chars().any(char::is_alphanumeric) {
+        return 0;
+    }
+    if t.split_whitespace().count() <= 4 && t.trim_end_matches(['*', '_']).ends_with(':') {
+        return 0;
+    }
+    t.chars().count().div_ceil(100)
+}
+
+/// A line in a key-table block that holds a key: not blank, not a box border, not a comment.
+fn is_key_line(l: &str) -> bool {
+    let t = l.trim();
+    t.chars().any(char::is_alphanumeric) && !t.starts_with("\" ") && !t.starts_with('#')
 }
 
 /// Close a run of unfenced command lines (one that is only comments is not a command).
@@ -545,14 +578,17 @@ fn analyze(body: &str, vocab: &Vocab, keys_tool: Option<&str>) -> Analysis {
         if kind == BlockKind::Shell {
             let explicit = !lang.is_empty() && !matches!(lang.as_str(), "text" | "txt");
             let unix = !pairs::is_powershell(&lang);
-            let progs: Vec<String> = if explicit {
+            let typed: Vec<&str> = if explicit {
                 // the author said "shell": lines that would be typed (not `Host myserver` directives)
-                text.lines().filter(|l| pairs::is_command_line(l, unix)).flat_map(derive::programs_of_line).collect()
+                text.lines().filter(|l| pairs::is_command_line(l, unix)).collect()
             } else {
                 // bare fence: believe only command-shaped lines
-                text.lines().filter(|l| vocab.command_line(l).is_some()).flat_map(derive::programs_of_line).collect()
+                text.lines().filter(|l| vocab.command_line(l).is_some()).collect()
             };
-            a.programs.extend(progs);
+            a.cmd_lines += typed.len();
+            a.programs.extend(typed.into_iter().flat_map(derive::programs_of_line));
+        } else {
+            a.cmd_lines += text.lines().filter(|l| is_key_line(l)).count();
         }
         a.fenced_cmd = true;
         blocks.push(text.to_string());
@@ -585,13 +621,21 @@ fn analyze(body: &str, vocab: &Vocab, keys_tool: Option<&str>) -> Analysis {
             group.push(t);
         } else {
             flush_group(&mut group, &mut groups);
+            if !pairs::is_pair_line(t) {
+                a.prose += prose_weight(t);
+            }
         }
     }
     flush_group(&mut group, &mut groups);
 
-    // `- `cmd` - what it does` bullets and table rows are commands too.
-    let inline = pairs::inline_pairs(body, keys_tool.is_some());
+    // `- `cmd` - what it does` bullets and table rows are commands too — but a flag on
+    // its own (`-l`) or notation (`*.log`) only documents one, except as a vim/tmux key.
+    let inline: Vec<pairs::Pair> = pairs::inline_pairs(body, keys_tool.is_some())
+        .into_iter()
+        .filter(|p| keys_tool.is_some() || pairs::is_typed_command(&p.command))
+        .collect();
     a.inline = inline.len();
+    a.cmd_lines += a.unfenced + a.inline;
     for p in &inline {
         a.programs.extend(derive::programs_of_line(&p.command));
     }
@@ -608,51 +652,106 @@ fn analyze(body: &str, vocab: &Vocab, keys_tool: Option<&str>) -> Analysis {
     a
 }
 
-/// A command is either fenced shell/keys, or command lines — unfenced, or
-/// `` - `cmd` - description `` bullets/table rows — that make up a real share of
-/// the body (a quarter, or at least three).
-fn categorize(title_low: &str, a: &Analysis) -> Category {
-    let share = |n: usize| n > 0 && (n * 4 >= a.text_lines || n >= 3);
-    if a.fenced_cmd || share(a.unfenced) || share(a.inline) {
-        return Category::Command;
-    }
-    let words: Vec<&str> = title_low.split(|c: char| !c.is_alphanumeric()).collect();
-    if words.iter().any(|w| TOOL_WORDS.contains(w)) {
-        return Category::Tool;
-    }
-    Category::Note
+/// Which rule decided an entry's category (counted in the report).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// The heading names a program and the body describes it.
+    Profile,
+    /// The heading is about tools in general ("Security Tools"), with no command in it.
+    ToolList,
+    /// Commands make up the entry.
+    Commands,
+    /// There are commands, but they are a few lines in an article.
+    Prose,
+    /// Text with no command in it.
+    Text,
 }
 
-/// `nmap (Port Scanning)`, `# find`, `awk — text processing`: the heading names the program.
-/// A bare single word must be lower case as written; English words that happen to
-/// be programs (`Install`, `Time`) don't count.
-fn title_tool(raw_title: &str, vocab: &Vocab) -> Option<String> {
-    let t = raw_title.trim().trim_matches(|c: char| c == '*' || c == '`').trim();
-    let end = t.find(|c: char| c.is_whitespace() || matches!(c, '(' | ':' | '—' | '–')).unwrap_or(t.len());
+/// Which tab an entry belongs in, from what the section *is*:
+///
+/// * `tool` — a profile of one program: the heading names it (`ls`, `nmap (Advanced)`,
+///   `cat - Concatenate Files`) and the body says what it is or does, not only how to
+///   run it. A heading about tools in general ("Security Tools") without commands, too.
+/// * `command` — a fenced shell/keys block in which a line would be typed, or command
+///   lines (unfenced, or `` - `cmd` - description `` bullets and table rows) that make up
+///   a real share of the text (a quarter, or at least three) …
+/// * … unless they are a few commands in an article: `PROSE_MIN`+ lines of prose,
+///   more than `PROSE_PER_CMD` for every command line, is a `note`.
+/// * `note` — everything else.
+fn categorize(title_low: &str, names_program: bool, a: &Analysis) -> (Category, Why) {
+    let share = |n: usize| n > 0 && (n * 4 >= a.text_lines || n >= 3);
+    let has_cmd = a.fenced_cmd || share(a.unfenced) || share(a.inline);
+    if names_program && (a.prose >= 2 || !has_cmd) {
+        return (Category::Tool, Why::Profile);
+    }
+    if !has_cmd {
+        let words: Vec<&str> = title_low.split(|c: char| !c.is_alphanumeric()).collect();
+        if words.iter().any(|w| TOOL_WORDS.contains(w)) {
+            return (Category::Tool, Why::ToolList);
+        }
+        return (Category::Note, Why::Text);
+    }
+    if a.prose >= PROSE_MIN && a.prose > PROSE_PER_CMD * a.cmd_lines {
+        return (Category::Note, Why::Prose);
+    }
+    (Category::Command, Why::Commands)
+}
+
+/// Does the section's own code — fenced blocks and `inline code` — use `name` as a word?
+/// (`katoolin.py` and `load mimikatz` count; `dradis-setup` alone does not name `dradis`.)
+fn code_mentions(body: &str, name: &str) -> bool {
+    let has_word = |text: &str| {
+        let text = text.to_lowercase();
+        text.match_indices(name).any(|(i, _)| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + name.len()..].chars().next();
+            !before.is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+                && !after.is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+        })
+    };
+    if fenced_blocks_lang(body).iter().any(|(_, b)| has_word(b)) {
+        return true;
+    }
+    let mut in_code = false;
+    body.lines().any(|l| {
+        if l.trim_start().starts_with("```") {
+            in_code = !in_code;
+            return false;
+        }
+        !in_code && l.split('`').skip(1).step_by(2).any(has_word)
+    })
+}
+
+/// `nmap (Port Scanning)`, `# find`, `awk — text processing`, `gzip/gunzip`: the heading
+/// names the program. A bare single word must be lower case as written; English words
+/// that happen to be programs (`Install`, `Time`) don't count. A name the file runs too
+/// rarely to be known (`mimikatz`, `openvas`) counts when the section's code uses it.
+fn title_tool(title: &str, body: &str, vocab: &Vocab) -> Option<String> {
+    let t = title.trim().trim_matches(|c: char| c == '*' || c == '`').trim();
+    let end = t.find(|c: char| c.is_whitespace() || matches!(c, '(' | ':' | '—' | '–' | '/')).unwrap_or(t.len());
     let (first, rest) = t.split_at(end);
     let rest = rest.trim();
     let stem = first.to_lowercase();
-    if !vocab.knows(&stem) {
+    let tagline = rest.starts_with(['(', '—', '–', ':']) || rest.starts_with("- ");
+    if stem.is_empty() || !(rest.is_empty() || tagline || rest.starts_with('/')) {
         return None;
     }
-    let delimited = rest.is_empty()
-        || rest.starts_with(['(', '—', '–', ':'])
-        || rest.starts_with("- ");
-    if !delimited {
-        return None;
+    if vocab.knows(&stem) {
+        let capitalised_word = rest.is_empty() && first.chars().any(|c| c.is_uppercase());
+        return (!capitalised_word).then_some(stem);
     }
-    if rest.is_empty() && first.chars().any(|c| c.is_uppercase()) {
-        return None;
-    }
-    Some(stem)
+    // `input/output` is two words, not a program: an unknown name needs to stand alone.
+    let alone = rest.is_empty() || tagline;
+    (alone && first == stem && derive::could_be_program(&stem) && code_mentions(body, &stem)).then_some(stem)
 }
 
-fn pick_tool(raw_title: &str, tags: &[String], a: &Analysis, vocab: &Vocab) -> String {
+fn pick_tool(heading_tool: Option<&str>, tags: &[String], a: &Analysis, vocab: &Vocab) -> String {
     // Keybinding-heavy topics: the topic *is* the tool, whatever the first line says.
     if let Some(t) = tags.iter().map(|t| t.to_lowercase()).find(|t| t == "vim" || t == "tmux") {
         return t;
     }
-    title_tool(&clean_title(raw_title), vocab)
+    heading_tool
+        .map(str::to_string)
         .or_else(|| a.lang_tool.clone())
         .or_else(|| derive::dominant_tool(&a.programs, vocab))
         .unwrap_or_default()
@@ -725,8 +824,8 @@ struct Draft {
     title:     String,
     ancestors: Vec<String>, // nearest first
     entry:     NewEntry,
-    /// Set for per-command entries: (kind, description, normalised command).
-    pair:      Option<(PairKind, String, String)>,
+    /// The rule that chose `entry.category`.
+    why:       Why,
 }
 
 /// "Examples" under Docker and under Git are different entries: prefix the
@@ -755,63 +854,35 @@ fn qualified(title: &str, ancestors: &[String], depth: usize) -> String {
 fn drop_repeats(drafts: &mut Vec<Draft>, report: &mut Report) {
     let mut seen: HashSet<(String, String, Vec<String>)> = HashSet::new();
     let before = drafts.len();
-    // per-command entries have their own, looser check (`drop_pair_repeats`)
-    drafts.retain(|d| d.pair.is_some() || seen.insert((d.title.to_lowercase(), d.entry.content.clone(), d.ancestors.clone())));
+    drafts.retain(|d| seen.insert((d.title.to_lowercase(), d.entry.content.clone(), d.ancestors.clone())));
     report.repeats = before - drafts.len();
 }
 
-/// The same description + command in two places (overlapping cheat sheets) is one entry.
-fn drop_pair_repeats(drafts: &mut Vec<Draft>, report: &mut Report) {
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let before = drafts.len();
-    drafts.retain(|d| match &d.pair {
-        Some((_, desc, cmd)) => seen.insert((desc.clone(), cmd.clone())),
-        None => true,
-    });
-    report.pair_repeats = before - drafts.len();
-}
-
-/// A command with its comment lines and spacing stripped, for comparing two spellings of it.
-fn norm_cmd(c: &str) -> String {
-    c.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("\" "))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// `vim` / `tmux` / `emacs` for a word naming one of those keys tools.
+fn keys_tool_name(w: &str) -> Option<&'static str> {
+    match w {
+        "tmux" => Some("tmux"),
+        "vim" | "neovim" | "nvim" => Some("vim"),
+        "emacs" => Some("emacs"),
+        _ => None,
+    }
 }
 
 /// The program a keys section is about: a vim/tmux/emacs tag, else the first of those
 /// words in the heading path. It is what lets a bare two-column fence be read as a key table.
 fn keys_context(tags: &[String], title: &str, anc: &[String]) -> Option<&'static str> {
-    let name = |w: &str| match w {
-        "tmux" => Some("tmux"),
-        "vim" | "neovim" | "nvim" => Some("vim"),
-        "emacs" => Some("emacs"),
-        _ => None,
-    };
     tags.iter()
-        .find_map(|t| name(&t.to_lowercase()))
+        .find_map(|t| keys_tool_name(&t.to_lowercase()))
         .or_else(|| {
             std::iter::once(title)
                 .chain(anc.iter().map(String::as_str))
-                .find_map(|text| text.split(|c: char| !c.is_alphanumeric()).find_map(|w| name(&w.to_lowercase())))
+                .find_map(|text| text.split(|c: char| !c.is_alphanumeric()).find_map(|w| keys_tool_name(&w.to_lowercase())))
         })
 }
 
-fn pair_tool(p: &pairs::Pair, keys_tool: Option<&str>, fallback: &str, vocab: &Vocab) -> String {
-    if let Some(t) = &p.tool {
-        return t.clone();
-    }
-    // In a vim/tmux section a lone word like `dd` or `p` is a keystroke, not a program.
-    if let Some(k) = keys_tool {
-        if p.command.split_whitespace().count() < 2 {
-            return k.to_string();
-        }
-    }
-    let progs: Vec<String> = p.command.lines().flat_map(derive::programs_of_line).collect();
-    derive::dominant_tool(&progs, vocab)
-        .or_else(|| keys_tool.map(str::to_string))
-        .unwrap_or_else(|| fallback.to_string())
+/// Is the program `t` the keys tool `k` itself (`nvim` in vim notes)?
+fn same_keys_tool(t: &str, k: &str) -> bool {
+    keys_tool_name(t) == Some(k)
 }
 
 fn make_unique(drafts: &mut [Draft], report: &mut Report) {
@@ -964,6 +1035,13 @@ fn plan(text: &str, opts: &ImportOptions) -> Plan {
         let base = display_title(&n.title, &anc);
         let keywords = context_words(&anc, &n.title, printed);
         let keys_tool = keys_context(&tags, &n.title, &anc);
+        // In vim/tmux notes a heading like `dd` is a keystroke, not the program of that name.
+        let heading_tool = title_tool(&n.title, &n.body, &vocab).filter(|t| keys_tool.map_or(true, |k| same_keys_tool(t, k)));
+        // The whole section decides the tab, so the parts of a long one stay together.
+        let whole = analyze(&n.body, &vocab, keys_tool);
+        let (category, why) = categorize(&low, heading_tool.is_some(), &whole);
+        // A tool profile keeps a copy-ready command (`recall cmd ls`); a note is for reading.
+        let runnable = category != Category::Note;
         let parts = split_body(&n.body, MAX_PART);
         let np = parts.len();
         if np > 1 {
@@ -971,71 +1049,33 @@ fn plan(text: &str, opts: &ImportOptions) -> Plan {
         }
         for (k, part) in parts.into_iter().enumerate() {
             let title = if np > 1 { format!("{} ({}/{})", base, k + 1, np) } else { base.clone() };
-            let a = analyze(&part, &vocab, keys_tool);
-            let category = categorize(&low, &a);
-            let is_cmd = category == Category::Command;
+            let a = analyze(&part, &vocab, keys_tool); // its own command, danger and programs
             let (content, truncated) = cap_chars(&part, HARD_CAP);
             if truncated {
                 report.truncated += 1;
             }
-            let tool = pick_tool(&n.raw, &tags, &a, &vocab);
+            let tool = pick_tool(heading_tool.as_deref(), &tags, &a, &vocab);
             drafts.push(Draft {
                 title: title.clone(),
                 ancestors: anc.clone(),
+                why,
                 entry: NewEntry {
                     title,
                     content,
-                    category,
+                    category: category.clone(),
                     tags: tags.clone(),
                     tool,
-                    command: if is_cmd { a.command } else { String::new() },
+                    command: if runnable { a.command } else { String::new() },
                     keywords: keywords.clone(),
-                    danger: is_cmd && a.danger,
+                    danger: runnable && a.danger,
                     source: Source::Import,
                     ..Default::default()
                 },
-                pair: None,
             });
-        }
-
-        if opts.per_command {
-            // Each annotated command becomes an entry of its own: the title says what it
-            // does, `command` is that one command. Skipped when the section already *is* it.
-            let section_cmd = norm_cmd(&analyze(&n.body, &vocab, keys_tool).command);
-            let fallback = pick_tool(&n.raw, &tags, &Analysis::default(), &vocab);
-            let mut pair_anc: Vec<String> = vec![n.title.clone()];
-            pair_anc.extend(anc.iter().cloned());
-            for p in pairs::extract(&n.body, &vocab, keys_tool) {
-                let cmd_key = norm_cmd(&p.command);
-                if cmd_key.is_empty() || cmd_key == section_cmd {
-                    continue;
-                }
-                let title = display_title(&p.desc, &pair_anc);
-                let lang = if p.kind == PairKind::Keys { keys_tool.unwrap_or("") } else { "bash" };
-                let tool = pair_tool(&p, keys_tool, &fallback, &vocab);
-                drafts.push(Draft {
-                    title: title.clone(),
-                    ancestors: pair_anc.clone(),
-                    pair: Some((p.kind, p.desc.to_lowercase(), cmd_key)),
-                    entry: NewEntry {
-                        title,
-                        content: format!("```{}\n{}\n```", lang, p.command),
-                        category: Category::Command,
-                        tags: tags.clone(),
-                        tool,
-                        danger: danger_reason(&p.command).is_some(),
-                        command: p.command.clone(),
-                        keywords: context_words(&pair_anc[..1], &p.desc, printed), // just the section: tags and tool carry the rest
-                        source: Source::Import,
-                        ..Default::default()
-                    },
-                });
-            }
         }
     }
 
     drop_repeats(&mut drafts, &mut report);
-    drop_pair_repeats(&mut drafts, &mut report);
     make_unique(&mut drafts, &mut report);
 
     let mut sizes: Vec<usize> = Vec::with_capacity(drafts.len());
@@ -1043,11 +1083,10 @@ fn plan(text: &str, opts: &ImportOptions) -> Plan {
     for d in drafts {
         let mut e = d.entry;
         e.title = d.title;
-        match d.pair.as_ref().map(|p| p.0) {
-            Some(PairKind::Shell) => report.pairs_shell += 1,
-            Some(PairKind::Inline) => report.pairs_inline += 1,
-            Some(PairKind::Keys) => report.pairs_keys += 1,
-            None => {}
+        match d.why {
+            Why::Profile => report.profiles += 1,
+            Why::Prose => report.prose_notes += 1,
+            Why::ToolList | Why::Commands | Why::Text => {}
         }
         match e.category {
             Category::Command => report.commands += 1,
@@ -1105,7 +1144,7 @@ mod tests {
     use super::*;
 
     fn opts() -> ImportOptions {
-        ImportOptions { dry_run: false, flagged_only: false, extra_tags: vec![], per_command: false }
+        ImportOptions { dry_run: false, flagged_only: false, extra_tags: vec![] }
     }
     fn entries(md: &str) -> Vec<NewEntry> {
         plan(md, &opts()).items
@@ -1479,77 +1518,105 @@ mod tests {
         assert_ne!(entries(elsewhere)[0].tool, "vim");
     }
 
-    // ── per-command entries ──
+    // ── one entry per section, in the right tab ──
 
-    fn per_cmd(md: &str) -> Plan {
-        plan(md, &ImportOptions { per_command: true, ..opts() })
+    /// A tool card the way the notes write them: description, syntax, options, examples.
+    const LS_CARD: &str = "## File and Directory Operations\n\n### ls\n\n**Description:** List directory contents with various formatting options.\n\n**When to use:** Viewing files and their properties, checking permissions, sorting by date or size.\n\n**Syntax:**\n```bash\nls [options] [file/directory]\n```\n\n**Important options:**\n- `-l`: Long format (permissions, owner, size, date)\n- `-a`: Show hidden files (starting with .)\n\n**Examples:**\n```bash\n# Detailed listing with human-readable sizes\nls -lah /home/user/\n\n# Sort by modification time, newest first\nls -lt /var/log/\n```\n";
+
+    #[test]
+    fn a_cheat_sheet_is_one_entry_and_its_commands_are_not_copied_out() {
+        // The bug this replaced: every annotated line also became an entry of its own,
+        // so `ls`, `mkdir`, `df` … were listed again, one per line, next to the section.
+        let md = "# Essential Linux Commands: A Practical Reference\n\n```bash\n# File operations\nls -la                    # List files with details\nmkdir -p /path/to/dir     # Create directory and parents\n\n# System info\ndf -h                     # Disk space\nfree -h                   # Memory usage\n```\n";
+        let es = entries(md);
+        assert_eq!(es.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(), vec!["Essential Linux Commands: A Practical Reference"]);
+        assert_eq!(es[0].category, Category::Command);
+        let es = entries(LS_CARD);
+        assert_eq!(es.len(), 1, "the examples inside a card stay in the card");
     }
 
     #[test]
-    fn per_command_is_off_by_default_and_makes_one_entry_per_annotated_command_when_on() {
-        let md = "## File operations\n\n```bash\nls -la  # List files with details\nfind . -name '*.log'  # Find log files\n```\n";
-        assert_eq!(entries(md).len(), 1, "off by default: just the section");
-        let p = per_cmd(md);
-        let titles: Vec<&str> = p.items.iter().map(|e| e.title.as_str()).collect();
-        assert_eq!(titles, vec!["File operations", "List files with details", "Find log files"]);
-        let ls = find(&p.items, "List files with details");
-        assert_eq!((ls.command.as_str(), ls.tool.as_str(), ls.category.clone()), ("ls -la", "ls", Category::Command));
-        assert_eq!(ls.tags, p.items[0].tags, "inherits the section's tags");
-        assert!(ls.keywords.contains("operations"), "the section name is searchable context: {:?}", ls.keywords);
-        assert_eq!(ls.content, "```bash\nls -la\n```");
-        assert_eq!((p.report.pairs_shell, p.report.pairs_inline, p.report.pairs_keys), (2, 0, 0));
-        assert!(p.report.render().contains("per-command"));
-    }
-
-    #[test]
-    fn a_section_that_already_is_one_command_gets_no_duplicate_entry() {
-        let md = "## Find large files\n\n```bash\n# Find large files over 100 MB\nfind / -size +100M -type f\n```\n";
-        assert_eq!(per_cmd(md).items.len(), 1);
-    }
-
-    #[test]
-    fn repeated_descriptions_are_told_apart_by_their_section_and_identical_pairs_collapse() {
-        let md = "## Git\n\n```bash\ngit --version  # Show the version installed\n```\n\n## Docker\n\n```bash\ndocker --version  # Show the version installed\n```\n\n## Podman\n\n```bash\ndocker --version  # Show the version installed\n```\n";
-        let p = per_cmd(md);
-        let t: Vec<&str> = p.items.iter().map(|e| e.title.as_str()).collect();
-        assert!(t.contains(&"Git — Show the version installed"), "{:?}", t);
-        assert!(t.contains(&"Docker — Show the version installed"), "{:?}", t);
-        assert_eq!(p.report.pair_repeats, 1, "the identical docker pair under Podman collapses: {:?}", t);
-    }
-
-    #[test]
-    fn keys_and_bullets_become_entries_with_the_sections_tool() {
-        let md = "## Vim registers\n\n```vim\n\"_dd   \" Delete without yanking\nyy   \" Yank the current line\n```\n\n- `:reg` - Show all registers\n";
-        let p = per_cmd(md);
-        let del = find(&p.items, "Delete without yanking");
-        assert_eq!((del.command.as_str(), del.tool.as_str()), ("\"_dd", "vim"));
-        let reg = find(&p.items, "Show all registers");
-        assert_eq!((reg.command.as_str(), reg.tool.as_str()), (":reg", "vim"), "a lone key is not the program of the same name");
-        assert_eq!((p.report.pairs_keys, p.report.pairs_inline), (2, 1));
-    }
-
-    #[test]
-    fn a_single_letter_key_in_a_vim_table_is_not_read_as_a_program() {
-        let md = "## Vim editing\n\n```\ndd         delete line\np          paste after cursor\n```\n";
-        let p = per_cmd(md);
-        assert_eq!(find(&p.items, "Delete line").tool, "vim", "dd here is a keystroke, not dd(1)");
-    }
-
-    #[test]
-    fn a_destructive_pair_is_flagged_on_its_own_entry_only() {
-        let md = "## Disks\n\n```bash\nsudo dd if=/dev/zero of=/dev/sda bs=1M  # Wipe the whole disk\nls /dev  # List the devices\n```\n";
-        let p = per_cmd(md);
-        assert!(find(&p.items, "Wipe the whole disk").danger);
-        assert!(!find(&p.items, "List the devices").danger);
-    }
-
-    #[test]
-    fn per_command_import_is_idempotent_and_deterministic() {
-        let md = "## A\n\n```bash\nls -la  # List files here\n```\n\n## B\n\n```bash\nls -la  # List files here\npwd  # Print the working directory\n```\n";
-        let a: Vec<String> = per_cmd(md).items.into_iter().map(|e| e.title).collect();
-        for _ in 0..5 {
-            assert_eq!(per_cmd(md).items.into_iter().map(|e| e.title).collect::<Vec<_>>(), a);
+    fn a_program_profile_is_a_tool_entry_that_keeps_its_command() {
+        let e = &entries(LS_CARD)[0];
+        assert_eq!((e.category.clone(), e.tool.as_str()), (Category::Tool, "ls"));
+        assert!(e.command.starts_with("ls "), "`recall cmd ls` still prints something: {:?}", e.command);
+        for title in ["cat - Concatenate Files", "nmap (Advanced)", "gzip/gunzip", "tmux: A Comprehensive Guide"] {
+            let program = title.split(|c: char| !c.is_alphanumeric() && c != '-').next().unwrap();
+            let md = format!("## {}\n\nWhat this program does, in a sentence or two.\n\nWhen it is the right one to reach for.\n\n```bash\n{} --help\n```\n", title, program);
+            assert_eq!(entries(&md)[0].category, Category::Tool, "{:?}", title);
         }
+    }
+
+    #[test]
+    fn a_program_heading_over_commands_alone_is_a_command() {
+        let md = "## nmap\n\n```bash\nnmap -sn 10.0.0.0/24\nnmap -sV -p- 10.0.0.5\n```\n";
+        let e = &entries(md)[0];
+        assert_eq!((e.category.clone(), e.tool.as_str()), (Category::Command, "nmap"), "a cheat sheet, not a profile");
+    }
+
+    #[test]
+    fn a_program_the_file_rarely_runs_is_named_by_its_heading_when_its_code_uses_it() {
+        let md = "### mimikatz\n\n**Description:** Tool for extracting plaintext passwords from memory.\n\n**When to use:** Windows post-exploitation, credential extraction.\n\n```bash\n# Usually run through Metasploit\nmeterpreter> load mimikatz\n```\n\n### openvas\n\n**Description:** Comprehensive vulnerability assessment tool.\n\n**When to use:** Full vulnerability scans, compliance checking.\n\n```bash\nsudo apt install openvas\nsudo gvm-setup\n```\n";
+        let es = entries(md);
+        assert_eq!((es[0].category.clone(), es[0].tool.as_str()), (Category::Tool, "mimikatz"));
+        assert_eq!((es[1].category.clone(), es[1].tool.as_str()), (Category::Tool, "openvas"), "not `apt`, which only installs it");
+        // a lower-case heading the code never uses is not a program: an Obsidian `cssclasses:` key
+        let md = "# cssclasses:\n\nLet's plan a proper scanning methodology for the target network.\n\n```bash\nnmap -sn 10.0.0.0/24\nnmap -sS -p- 10.0.0.5\n```\n";
+        assert_ne!(entries(md)[0].category, Category::Tool);
+        assert_eq!(title_tool("or", "```bash\ngit pull or push\n```", &Vocab::seed()), None, "an English word");
+        assert_eq!(title_tool("input/output", "`input` and `output`", &Vocab::seed()), None, "two words");
+    }
+
+    #[test]
+    fn a_keystroke_heading_in_vim_notes_is_not_the_program_of_that_name() {
+        let md = "## Vim\n\n### dd\n\nDeletes the current line and puts it in the unnamed register.\n\nA count in front deletes that many lines.\n\n```vim\ndd\n3dd\n```\n";
+        let e = &entries(md)[0];
+        assert_ne!(e.category, Category::Tool, "dd here is a keystroke, not dd(1)");
+        assert_eq!(e.tool, "vim");
+    }
+
+    #[test]
+    fn an_article_that_mentions_a_few_commands_is_a_note() {
+        let mut md = String::from("## When should you use Tor vs Firefox?\n\nUse Firefox for normal browsing and Tor Browser when you need anonymity.\n\n");
+        for i in 0..14 {
+            md.push_str(&format!("Point number {} about identities, logins and why anonymity breaks when you mix them.\n\n", i));
+        }
+        md.push_str("```bash\ntar -czf secret.tar.gz folder/\ngpg -c --cipher-algo AES256 secret.tar.gz\n```\n");
+        let p = plan(&md, &opts());
+        let e = &p.items[0];
+        assert_eq!(e.category, Category::Note);
+        assert_eq!((e.command.as_str(), e.danger), ("", false), "a note is for reading");
+        assert_eq!(p.report.prose_notes, 1);
+    }
+
+    #[test]
+    fn a_command_with_a_short_explanation_stays_a_command() {
+        let md = "## Process Inspection\n\n```bash\nps aux | grep -i warp | grep -v grep\n```\n**Purpose:** Check for running Warp Terminal processes\n**Explanation:**\n- `ps aux` - Lists all running processes with detailed information\n  - `a` = all users' processes\n  - `u` = user-oriented format (shows user, CPU, memory)\n- `grep -i warp` - Filters results to lines containing \"warp\"\n- `grep -v grep` - Excludes the grep command itself from results\n- **Result:** Found multiple Warp processes running normally\n";
+        assert_eq!(entries(md)[0].category, Category::Command);
+    }
+
+    #[test]
+    fn option_bullets_alone_are_reference_not_commands() {
+        let md = "## Common flags\n\n- `-l` - Use a long listing format\n- `-a` - Do not ignore entries starting with a dot\n- `-h` - Print sizes in human readable format\n";
+        assert_eq!(entries(md)[0].category, Category::Note);
+    }
+
+    #[test]
+    fn the_parts_of_a_long_section_share_its_category() {
+        let prose = "Background on the subject, written out as a full paragraph of explanation.\n\n".repeat(90);
+        let md = format!("## Long guide\n\n{}```bash\nls -la /etc\n```\n\n{}", prose, prose);
+        let es = entries(&md);
+        assert!(es.len() > 1);
+        assert!(es.iter().all(|e| e.category == Category::Note), "{:?}", es.iter().map(|e| (&e.title, &e.category)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn prose_weight_ignores_labels_and_rules_and_weighs_long_lines() {
+        assert_eq!(prose_weight("**Examples:**"), 0);
+        assert_eq!(prose_weight("Basic scans:"), 0);
+        assert_eq!(prose_weight("|---|---|"), 0);
+        assert_eq!(prose_weight("**Description:** List directory contents."), 1);
+        assert_eq!(prose_weight(&"word ".repeat(60)), 3);
     }
 
     #[test]
@@ -1559,5 +1626,8 @@ mod tests {
         assert_eq!((r.headings, r.commands, r.notes), (2, 1, 1));
         let s = r.render();
         assert!(s.contains("headings") && s.contains("entries") && s.contains("size"), "{}", s);
+        let r = plan(LS_CARD, &opts()).report;
+        assert_eq!((r.tools, r.profiles), (1, 1));
+        assert!(r.render().contains("program profiles"), "{}", r.render());
     }
 }
