@@ -40,6 +40,24 @@ pub fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// `cut -d: -f1 /etc/passwd    # usernames` → `cut -d: -f1 /etc/passwd`. Only a `#`
+/// after two spaces and outside quotes counts, so `curl 'x#y'` and `echo $#` survive.
+pub fn strip_trailing_comment(line: &str) -> &str {
+    let (mut single, mut double) = (false, false);
+    let b = line.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        match c {
+            b'\'' if !double => single = !single,
+            b'"' if !single => double = !double,
+            b'#' if !single && !double && i >= 2 && b[i - 1].is_ascii_whitespace() && b[i - 2].is_ascii_whitespace() => {
+                return line[..i].trim_end();
+            }
+            _ => {}
+        }
+    }
+    line.trim_end()
+}
+
 /// Lowercase alphanumeric slug with single dashes: "Scan ALL ports!" → "scan-all-ports".
 pub fn slugify(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -178,5 +196,13 @@ mod tests {
     #[test]
     fn like_escape_protects_wildcards() {
         assert_eq!(like_escape("50%_off\\"), "50\\%\\_off\\\\");
+    }
+
+    #[test]
+    fn trailing_comments_go_but_hashes_in_quotes_and_words_stay() {
+        assert_eq!(strip_trailing_comment("cut -d: -f1 /etc/passwd    # usernames"), "cut -d: -f1 /etc/passwd");
+        assert_eq!(strip_trailing_comment("curl 'http://x/#  a'  # fetch"), "curl 'http://x/#  a'");
+        assert_eq!(strip_trailing_comment("echo $# args"), "echo $# args");
+        assert_eq!(strip_trailing_comment("ls # one space is not a comment column"), "ls # one space is not a comment column");
     }
 }

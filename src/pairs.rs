@@ -1,43 +1,19 @@
-//! One entry per command.
+//! Where the commands in a section are.
 //!
-//! Cheat sheets annotate each command with what it does: a `# comment` above
-//! it, `cmd   # comment` after it, a `` - `cmd` - description `` bullet, a
-//! table row, or a two-column key table (`dd   delete line`). Those words are
-//! exactly what a person types when searching, so every (description, command)
-//! pair is worth an entry of its own: the title says what it does and `command`
-//! is that one command — not the whole section it happens to live in.
-//!
-//! This module also decides which fenced blocks *are* command blocks, so the
-//! importer's category and the pairs it extracts can never disagree.
+//! Commands live in fenced blocks (shell, or a vim/tmux key table) and in
+//! cheat-sheet lines outside them: a `` - `cmd` - description `` bullet or a
+//! table row. This module decides which fenced blocks *are* command blocks and
+//! finds those bullet/table pairs, so the importer can weigh how much of a
+//! section is commands and how much is prose.
 
 use crate::derive::{self, Vocab};
-use crate::models::fenced_blocks_lang;
-
-/// A comment above more lines than this describes a script, not one command.
-const MAX_GROUP_LINES: usize = 6;
-/// Per-section cap, so a pasted dotfile cannot flood the database.
-const MAX_PAIRS: usize = 80;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pair {
-    /// What it does — becomes the entry title.
+    /// What it does.
     pub desc:    String,
-    /// What to type: one command, or a short group of lines that belong together.
+    /// What to type.
     pub command: String,
-    pub kind:    PairKind,
-    /// The program the block itself names (`vim`/`tmux`/`awk` fences, key tables in a
-    /// vim/tmux section). `dd` in a vim key table is a keystroke, never the `dd` program.
-    pub tool:    Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PairKind {
-    /// From an annotated shell block.
-    Shell,
-    /// From a `` - `cmd` - description `` bullet or a table row.
-    Inline,
-    /// A keystroke or ex-command from a vim/tmux key table.
-    Keys,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,19 +113,6 @@ fn split_gap(t: &str) -> Option<(String, String)> {
     None
 }
 
-/// Is the left column plausibly a keystroke or a command, rather than a header
-/// word ("Tool", "Action")? Short, symbolic, a chord, or starting with a known program.
-fn key_like(left: &str, vocab: &Vocab) -> bool {
-    let first = left.split_whitespace().next().unwrap_or("");
-    left.chars().count() <= 40
-        && (left.chars().count() <= 3
-            || left.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace())
-            || vocab.knows(&first.to_lowercase())
-            || ["ctrl", "alt", "shift", "meta", "prefix", "leader", "esc", "enter", "tab", "space"]
-                .iter()
-                .any(|k| first.to_lowercase().starts_with(k)))
-}
-
 fn looks_like_key_table(text: &str) -> bool {
     let rows: Vec<String> = text.lines().map(strip_box).filter(|l| !l.is_empty()).collect();
     let hits = rows.iter().filter(|r| split_gap(r).is_some()).count();
@@ -183,7 +146,7 @@ const NOISE: &[&str] = &[
     "optional", "required", "etc", "todo", "warning", "important", "tip", "same", "see above", "see below",
 ];
 
-/// Is `d` a description worth a title: real words, not a section marker or an annotation?
+/// Is `d` a description: real words, not a section marker or an annotation?
 fn valid_desc(d: &str, min_words: usize) -> bool {
     let lower = d.to_lowercase();
     d.split_whitespace().count() >= min_words
@@ -195,129 +158,11 @@ fn valid_desc(d: &str, min_words: usize) -> bool {
         && !lower.starts_with("example output")
 }
 
-fn leading_desc(c: &str) -> Option<String> {
-    let d = clean_desc(c);
-    valid_desc(&d, 2).then_some(d) // one word above a group is a section label, not a description
-}
-
-/// A description after the command. Two words in a shell or bullet context — a lone word
-/// (`# Graceful`) is an annotation, not a title; one is enough for a key (`Ctrl-b d` — Detach).
+/// A description next to a command. Two words in a shell or bullet context — a lone word
+/// (`Graceful`) is an annotation; one is enough for a key (`Ctrl-b d` — Detach).
 fn trailing_desc(c: &str, min_words: usize) -> Option<String> {
     let d = clean_desc(c);
     valid_desc(&d, min_words).then_some(d)
-}
-
-// ─── comment-annotated lines ─────────────────────────────────────────────────
-
-struct Style {
-    /// Characters that start a comment.
-    markers: &'static [char],
-    /// Also read `keys   description` (two spaces / tab / arrow) as a pair.
-    gap:     bool,
-}
-
-const SHELL: Style = Style { markers: &['#'], gap: false };
-const VIM: Style = Style { markers: &['"', '#'], gap: true };
-const KEYS: Style = Style { markers: &['#'], gap: true };
-
-/// `# text` (or `" text` in vim) on a line by itself -> the text. `#!shebang` -> "".
-fn full_line_comment<'a>(t: &'a str, markers: &[char]) -> Option<&'a str> {
-    let c = t.chars().next()?;
-    if !markers.contains(&c) {
-        return None;
-    }
-    let rest = &t[c.len_utf8()..];
-    if c == '#' {
-        return Some(if rest.starts_with('!') { "" } else { rest.trim_start_matches('#').trim() });
-    }
-    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-}
-
-/// `cmd   # text` -> (cmd, Some(text)). A marker only starts a comment after
-/// whitespace and before whitespace, and never inside quotes.
-fn split_trailing_comment(t: &str, markers: &[char], track_quotes: bool) -> (String, Option<String>) {
-    let chars: Vec<(usize, char)> = t.char_indices().collect();
-    let mut quote: Option<char> = None;
-    for (k, &(i, c)) in chars.iter().enumerate() {
-        if track_quotes {
-            if let Some(q) = quote {
-                if c == q {
-                    quote = None;
-                }
-                continue;
-            }
-            if c == '\'' || c == '"' {
-                quote = Some(c);
-                continue;
-            }
-        }
-        if markers.contains(&c)
-            && k > 0
-            && chars[k - 1].1.is_whitespace()
-            && chars.get(k + 1).map_or(true, |&(_, n)| n.is_whitespace())
-        {
-            return (t[..i].trim_end().to_string(), Some(t[i + c.len_utf8()..].trim().to_string()));
-        }
-    }
-    (t.to_string(), None)
-}
-
-fn flush(desc: &Option<String>, group: &mut Vec<String>, kind: PairKind, out: &mut Vec<Pair>) {
-    if let Some(d) = desc {
-        if !group.is_empty() && group.len() <= MAX_GROUP_LINES {
-            out.push(Pair { desc: d.clone(), command: group.join("\n"), kind, tool: None });
-        }
-    }
-    group.clear();
-}
-
-fn annotated(text: &str, style: &Style, kind: PairKind, vocab: &Vocab, unix: bool) -> Vec<Pair> {
-    let mut out = Vec::new();
-    let mut desc: Option<String> = None;
-    let mut group: Vec<String> = Vec::new();
-    for raw in text.lines() {
-        let t = if style.gap { strip_box(raw) } else { raw.trim().to_string() };
-        if t.is_empty() {
-            flush(&desc, &mut group, kind, &mut out);
-            desc = None;
-            continue;
-        }
-        if let Some(c) = full_line_comment(&t, style.markers) {
-            flush(&desc, &mut group, kind, &mut out);
-            desc = leading_desc(c);
-            continue;
-        }
-        let track = !style.markers.contains(&'"');
-        let min_words = if kind == PairKind::Keys { 1 } else { 2 };
-        let (code, trailing) = split_trailing_comment(&t, style.markers, track);
-        // In a Unix shell block a capitalised line is a config directive (`Host myserver`), not a command.
-        if kind == PairKind::Shell && !is_command_line(&code, unix) {
-            flush(&desc, &mut group, kind, &mut out);
-            desc = None;
-            continue;
-        }
-        if let Some(d) = trailing.as_deref().and_then(|c| trailing_desc(c, min_words)) {
-            flush(&desc, &mut group, kind, &mut out);
-            out.push(Pair { desc: d, command: code, kind, tool: None });
-            desc = None;
-            continue;
-        }
-        if style.gap {
-            if let Some((l, r)) = split_gap(&t) {
-                if let Some(d) = trailing_desc(&r, min_words).filter(|_| key_like(&l, vocab)) {
-                    flush(&desc, &mut group, kind, &mut out);
-                    out.push(Pair { desc: d, command: l, kind, tool: None });
-                    desc = None;
-                    continue;
-                }
-            }
-        }
-        if desc.is_some() {
-            group.push(code);
-        }
-    }
-    flush(&desc, &mut group, kind, &mut out);
-    out
 }
 
 // ─── bullets and tables ──────────────────────────────────────────────────────
@@ -372,6 +217,11 @@ fn table_pair(l: &str) -> Option<(String, String)> {
     (!code.is_empty() && !desc.is_empty() && !is_code_cell(desc)).then(|| (code.to_string(), desc.to_string()))
 }
 
+/// Is this line a bullet or table row that pairs inline code with a description?
+pub fn is_pair_line(l: &str) -> bool {
+    bullet_pair(l).or_else(|| table_pair(l)).is_some()
+}
+
 /// Bullet and table pairs outside code fences. `keys` says the section is about a
 /// keys tool (vim/tmux/emacs), where a one-word description ("Paste") is fine.
 pub fn inline_pairs(body: &str, keys: bool) -> Vec<Pair> {
@@ -388,31 +238,23 @@ pub fn inline_pairs(body: &str, keys: bool) -> Vec<Pair> {
         }
         if let Some((code, desc)) = bullet_pair(l).or_else(|| table_pair(l)) {
             if let Some(d) = trailing_desc(&desc, min_words) {
-                out.push(Pair { desc: d, command: code, kind: PairKind::Inline, tool: None });
+                out.push(Pair { desc: d, command: code });
             }
         }
     }
     out
 }
 
-// ─── the whole section ───────────────────────────────────────────────────────
-
-fn is_option_only(p: &Pair) -> bool {
-    let c = p.command.trim();
-    c.starts_with('-') && !(p.kind == PairKind::Keys && c.chars().count() == 1)
-}
-
-/// Cheat sheets for regex, globs and paths list *notation* in the command column
-/// (`[a-zA-Z]{2,}`, `*.log`, `/var/`, `2>&1`, `$0`) — describable, but nothing you would
-/// type at a prompt. Keystrokes may look like anything; everything else has to start
-/// like a command, or be a path to a program.
-fn is_not_a_command(p: &Pair) -> bool {
-    let c = p.command.trim();
-    if c.ends_with('=') {
-        return true; // a dangling option (`conv=`)
-    }
-    if p.kind == PairKind::Keys {
-        return false;
+/// Is the code of a bullet/table pair something you would type at a prompt?
+///
+/// A flag on its own (`-l`, `--show`) documents an option of some tool, and cheat
+/// sheets for regex, globs and paths list *notation* (`[a-zA-Z]{2,}`, `*.log`, `/var/`,
+/// `2>&1`, `$0`) — describable, but not commands. A command starts like one, or is a
+/// path to a program.
+pub fn is_typed_command(c: &str) -> bool {
+    let c = c.trim();
+    if c.starts_with('-') || c.ends_with('=') {
+        return false; // an option (`-L`), or a dangling one (`conv=`)
     }
     let first = c.split_whitespace().next().unwrap_or("");
     // A lone absolute path is a "what lives where" table row (`/etc/passwd` — System users),
@@ -420,55 +262,15 @@ fn is_not_a_command(p: &Pair) -> bool {
     let lone = c.split_whitespace().count() == 1;
     let script = [".sh", ".bash", ".py", ".pl", ".rb", ".php"].iter().any(|e| first.ends_with(e));
     if lone && first.starts_with('/') && !script {
-        return true;
+        return false;
     }
     let path = (first.starts_with("./") || first.starts_with("~/") || first.starts_with('/'))
         && !first.ends_with('/')
         && first.len() > 2;
-    let ok = first.starts_with(|ch: char| ch.is_ascii_alphabetic())
+    first.starts_with(|ch: char| ch.is_ascii_alphabetic())
         || path
         || (first.starts_with('!') && first.len() >= 2) // history expansion: !! !$
-        || (first.starts_with(':') && first.len() >= 2); // ex command
-    !ok
-}
-
-/// Every (description, command) pair in a section body. `keys_tool` is the
-/// program the section is about when it is a keys topic (`vim`, `tmux`, `emacs`),
-/// which is what lets a bare two-column fence be read as a key table.
-pub fn extract(body: &str, vocab: &Vocab, keys_tool: Option<&str>) -> Vec<Pair> {
-    let mut out: Vec<Pair> = Vec::new();
-    for (lang, block) in fenced_blocks_lang(body) {
-        let text = block.trim_matches('\n');
-        if text.trim().is_empty() {
-            continue;
-        }
-        let kind = classify(&lang, text, vocab, keys_tool);
-        let unix = !is_powershell(&lang);
-        let mut found = match kind {
-            BlockKind::Shell => annotated(text, &SHELL, PairKind::Shell, vocab, unix),
-            BlockKind::Keys => annotated(text, if lang == "vim" { &VIM } else { &KEYS }, PairKind::Keys, vocab, unix),
-            BlockKind::Other => continue,
-        };
-        let block_tool = match lang.as_str() {
-            "vim" | "tmux" | "awk" => Some(lang.clone()),
-            _ if kind == BlockKind::Keys => keys_tool.map(str::to_string),
-            _ => None,
-        };
-        for p in &mut found {
-            p.tool = block_tool.clone();
-        }
-        out.extend(found);
-    }
-    out.extend(inline_pairs(body, keys_tool.is_some()));
-
-    // A flag on its own (`-l`, `--show`) documents an option of some tool; it is not a
-    // command, and `recall cmd` printing `-L` helps nobody. (`-` alone is a vim key.)
-    out.retain(|p| !is_option_only(p) && !is_not_a_command(p));
-
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|p| seen.insert((p.desc.to_lowercase(), p.command.clone())));
-    out.truncate(MAX_PAIRS);
-    out
+        || (first.starts_with(':') && first.len() >= 2) // ex command
 }
 
 #[cfg(test)]
@@ -478,82 +280,11 @@ mod tests {
     fn v() -> Vocab {
         Vocab::seed()
     }
-    fn fenced(lang: &str, body: &str) -> String {
-        format!("```{}\n{}\n```", lang, body)
-    }
-    fn pairs(lang: &str, body: &str) -> Vec<(String, String)> {
-        extract(&fenced(lang, body), &v(), None).into_iter().map(|p| (p.desc, p.command)).collect()
-    }
     fn p(d: &str, c: &str) -> (String, String) {
         (d.to_string(), c.to_string())
     }
-
-    // ── shell blocks ──
-
-    #[test]
-    fn a_comment_above_a_command_describes_it() {
-        assert_eq!(
-            pairs("bash", "# Update package list\nsudo apt update\n# Upgrade all packages\nsudo apt upgrade"),
-            vec![p("Update package list", "sudo apt update"), p("Upgrade all packages", "sudo apt upgrade")]
-        );
-    }
-
-    #[test]
-    fn a_trailing_comment_describes_its_own_line() {
-        assert_eq!(
-            pairs("bash", "ls -la   # List files with details\ncd /tmp  # Change directory"),
-            vec![p("List files with details", "ls -la"), p("Change directory", "cd /tmp")]
-        );
-    }
-
-    #[test]
-    fn a_comment_above_several_lines_covers_the_group_until_a_blank_line() {
-        let got = pairs("bash", "# Start a web server\ncd /srv\npython3 -m http.server 8000\n\nls");
-        assert_eq!(got, vec![p("Start a web server", "cd /srv\npython3 -m http.server 8000")]);
-    }
-
-    #[test]
-    fn a_section_header_comment_above_annotated_lines_is_not_their_description() {
-        let got = pairs("bash", "# File operations\nls -la  # List files\nmkdir -p a/b  # Create nested directories");
-        assert_eq!(got, vec![p("List files", "ls -la"), p("Create nested directories", "mkdir -p a/b")]);
-    }
-
-    #[test]
-    fn a_one_word_label_a_rule_or_a_shebang_is_not_a_description() {
-        assert!(pairs("bash", "# Sessions\ntmux ls").is_empty());
-        assert!(pairs("bash", "# =====================\nls -la").is_empty());
-        assert!(pairs("bash", "#!/bin/bash\nls -la").is_empty());
-        assert!(pairs("bash", "# Example:\nls -la").is_empty(), "'Example' alone says nothing");
-    }
-
-    #[test]
-    fn the_last_comment_before_the_command_wins() {
-        let got = pairs("bash", "# Network\n# Show listening ports\nss -tulpn");
-        assert_eq!(got, vec![p("Show listening ports", "ss -tulpn")]);
-    }
-
-    #[test]
-    fn a_hash_inside_quotes_or_a_url_is_not_a_comment() {
-        let got = pairs("bash", "echo \"a # b\"  # Print with a hash\ncurl http://x.io/#frag  # Fetch a page");
-        assert_eq!(got, vec![p("Print with a hash", "echo \"a # b\""), p("Fetch a page", "curl http://x.io/#frag")]);
-    }
-
-    #[test]
-    fn a_long_group_is_a_script_not_one_command() {
-        let body = format!("# Do the whole setup process\n{}", "echo step\n".repeat(9));
-        assert!(pairs("bash", &body).is_empty());
-    }
-
-    #[test]
-    fn output_and_annotation_words_are_not_titles() {
-        assert!(pairs("bash", "ls -la  # Output: total 24\nls  # default").is_empty());
-    }
-
-    #[test]
-    fn descriptions_are_cleaned_and_capitalised() {
-        assert_eq!(clean_desc("find **large** files (over `100M`):"), "Find large files (over 100M)");
-        assert_eq!(clean_desc("  lots   of\tspace. "), "Lots of space");
-        assert!(clean_desc(&"word ".repeat(40)).chars().count() <= 90);
+    fn pairs(body: &str) -> Vec<(String, String)> {
+        inline_pairs(body, false).into_iter().map(|p| (p.desc, p.command)).collect()
     }
 
     // ── which blocks count ──
@@ -567,52 +298,20 @@ mod tests {
         assert_eq!(classify("bash", "# only a comment", &vc, None), BlockKind::Other);
         assert_eq!(classify("python", "import os", &vc, None), BlockKind::Other);
         assert_eq!(classify("powershell", "Get-Service | Where Status -eq Running", &vc, None), BlockKind::Shell);
+        assert_eq!(classify("bash", "LD_PRELOAD=/tmp/x.so ls", &vc, None), BlockKind::Shell, "an assignment is typed");
         assert_eq!(classify("vim", "dd", &vc, None), BlockKind::Keys);
         assert_eq!(classify("tmux", "set -g mouse on", &vc, None), BlockKind::Shell);
         assert_eq!(classify("", "Use SSH when:\n- you need tunneling", &vc, None), BlockKind::Other, "a text box");
         assert_eq!(classify("", "nmap -sV 10.0.0.1", &vc, None), BlockKind::Shell);
     }
 
-    // ── key tables ──
-
-    #[test]
-    fn vim_blocks_read_quote_comments_and_two_column_lines() {
-        let body = "H            \" Toggle hidden files\n<Space>e  \" Toggle file explorer\n\"_dd\nx    delete char";
-        let got = extract(&fenced("vim", body), &v(), None);
-        let got: Vec<(String, String, PairKind)> = got.into_iter().map(|p| (p.desc, p.command, p.kind)).collect();
-        assert_eq!(
-            got,
-            vec![
-                ("Toggle hidden files".to_string(), "H".to_string(), PairKind::Keys),
-                ("Toggle file explorer".to_string(), "<Space>e".to_string(), PairKind::Keys),
-                ("Delete char".to_string(), "x".to_string(), PairKind::Keys),
-            ],
-            "\"_dd is a register command, not a comment"
-        );
-    }
-
     #[test]
     fn a_bare_two_column_fence_is_a_key_table_only_in_a_vim_or_tmux_section() {
         let body = "x          delete char\ndd         delete line\nciw        change inner word";
-        assert!(extract(&fenced("", body), &v(), None).is_empty(), "no keys context: just text");
-        let got = extract(&fenced("", body), &v(), Some("vim"));
-        assert_eq!(got.len(), 3);
-        assert_eq!((got[1].desc.as_str(), got[1].command.as_str()), ("Delete line", "dd"));
-    }
-
-    #[test]
-    fn a_header_row_is_not_a_key() {
-        let body = "Tool      Purpose\nx         delete char\ndd        delete line";
-        let got = extract(&fenced("", body), &v(), Some("vim"));
-        assert_eq!(got.len(), 2, "{:?}", got);
-    }
-
-    #[test]
-    fn a_box_drawn_cheat_sheet_yields_its_rows() {
-        let body = "┏━━━━━━━━━━━━━━━━━━━━━━━┓\n┃ TMUX SESSIONS         ┃\n┃  tmux new -s name   Create session  ┃\n┃  Ctrl-b d           Detach          ┃\n┃  Ctrl-b %           Split vertical  ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━┛";
-        let got: Vec<(String, String)> =
-            extract(&fenced("", body), &v(), Some("tmux")).into_iter().map(|p| (p.desc, p.command)).collect();
-        assert_eq!(got, vec![p("Create session", "tmux new -s name"), p("Detach", "Ctrl-b d"), p("Split vertical", "Ctrl-b %")]);
+        assert_eq!(classify("", body, &v(), Some("vim")), BlockKind::Keys);
+        assert_ne!(classify("", body, &v(), None), BlockKind::Keys, "no keys context: not a key table");
+        let boxed = "┏━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  tmux new -s name   Create session  ┃\n┃  Ctrl-b d           Detach          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━┛";
+        assert_eq!(classify("", boxed, &v(), Some("tmux")), BlockKind::Keys, "a box-drawn cheat sheet is a key table");
     }
 
     // ── bullets and tables ──
@@ -620,66 +319,51 @@ mod tests {
     #[test]
     fn inline_code_bullets_are_pairs() {
         let body = "- `:set hlsearch` - Highlight search results\n* `:noh`: Clear highlighting\n1. `p` → Paste after cursor\n- `dd` delete line";
-        let got: Vec<(String, String)> = inline_pairs(body, false).into_iter().map(|p| (p.desc, p.command)).collect();
-        assert_eq!(got, vec![p("Highlight search results", ":set hlsearch"), p("Clear highlighting", ":noh"), p("Paste after cursor", "p")]);
+        assert_eq!(pairs(body), vec![p("Highlight search results", ":set hlsearch"), p("Clear highlighting", ":noh"), p("Paste after cursor", "p")]);
+        assert!(is_pair_line("- `ls -la` - List everything") && !is_pair_line("- Use `ls` often"));
     }
 
     #[test]
     fn prose_bullets_and_bold_names_are_not_pairs() {
-        assert!(inline_pairs("- **tmux-resurrect**: Save/restore sessions\n- `sudo` is required for this\n- Use `ls` often", false).is_empty());
+        assert!(pairs("- **tmux-resurrect**: Save/restore sessions\n- `sudo` is required for this\n- Use `ls` often").is_empty());
     }
 
     #[test]
     fn table_rows_are_pairs_in_either_column_order() {
         let body = "| Key | Meaning |\n|---|---|\n| `dd` | Delete line |\n| System update | `sudo apt update` | Same | [Packages](#p) |";
-        let got: Vec<(String, String)> = inline_pairs(body, false).into_iter().map(|p| (p.desc, p.command)).collect();
-        assert_eq!(got, vec![p("Delete line", "dd"), p("System update", "sudo apt update")]);
+        assert_eq!(pairs(body), vec![p("Delete line", "dd"), p("System update", "sudo apt update")]);
     }
 
     #[test]
     fn a_one_word_description_is_enough_for_a_key_but_not_for_a_shell_command() {
-        assert!(pairs("bash", "kill -15 PID  # Graceful").is_empty());
-        assert!(inline_pairs("| `\\` | Backslash |", false).is_empty());
+        assert!(pairs("| `\\` | Backslash |").is_empty());
         assert_eq!(inline_pairs("- `p` - Paste", true).len(), 1, "keys section");
-        let got = extract(&fenced("vim", "p    \" Paste"), &v(), None);
-        assert_eq!(got.len(), 1);
     }
 
     #[test]
-    fn config_directives_and_notation_are_not_commands_but_assignments_and_cmdlets_are() {
-        // ssh config in a bash fence
-        assert!(pairs("bash", "# Old method with a jump host\nHost target\n    ProxyCommand ssh jump -W %h:%p").is_empty());
-        assert!(pairs("bash", "Banner /etc/ssh/banner.txt  # Show a banner before login").is_empty());
-        // ...but an assignment and a PowerShell cmdlet are typed at a prompt
-        assert_eq!(pairs("bash", "LD_PRELOAD=/tmp/x.so ls  # Preload a library for one run").len(), 1);
-        assert_eq!(pairs("powershell", "Get-Process  # List running processes now").len(), 1);
-        // regex / glob / path notation in a table
-        let body = "| `[a-zA-Z]{2,}` | Two or more letters |\n| `*.log` | Any log file |\n| `/var/` | Variable data |\n| `/etc/passwd` | System users |\n| `2>&1` | Redirect errors too |\n| `conv=` | Conversion options |\n| `./run.sh` | Run the script here |\n| `/opt/tools/scan.sh` | Run the scanner script |\n| `!!` | Repeat the last command |";
-        let got: Vec<String> = extract(body, &v(), None).into_iter().map(|p| p.command).collect();
-        assert_eq!(got, vec!["./run.sh", "/opt/tools/scan.sh", "!!"]);
+    fn output_and_annotation_words_are_not_descriptions() {
+        assert!(pairs("- `ls -la` - Output\n- `ls` - default").is_empty());
     }
 
     #[test]
-    fn a_flag_on_its_own_is_not_a_command() {
-        let body = "- `-l` - Count lines only\n- `--show` - Show cracked passwords\n| `-L` | Local port forwarding |\n- `wc -l` - Count lines";
-        let got: Vec<(String, String)> = extract(body, &v(), None).into_iter().map(|p| (p.desc, p.command)).collect();
-        assert_eq!(got, vec![p("Count lines", "wc -l")]);
-        let keys = extract(&fenced("vim", "-    \" Navigate up one directory"), &v(), None);
-        assert_eq!(keys.len(), 1, "a lone `-` is a vim key");
+    fn descriptions_are_cleaned_and_capitalised() {
+        assert_eq!(clean_desc("find **large** files (over `100M`):"), "Find large files (over 100M)");
+        assert_eq!(clean_desc("  lots   of\tspace. "), "Lots of space");
+        assert!(clean_desc(&"word ".repeat(40)).chars().count() <= 90);
     }
 
     #[test]
     fn code_inside_fences_is_left_to_the_fence_parser() {
-        assert!(inline_pairs("```\n- `ls` - list files\n```", false).is_empty());
+        assert!(pairs("```\n- `ls` - list files\n```").is_empty());
     }
 
-    // ── the whole section ──
-
     #[test]
-    fn duplicates_within_a_section_collapse_and_the_count_is_capped() {
-        let body = fenced("bash", "ls -la  # List files\nls -la  # List files");
-        assert_eq!(extract(&body, &v(), None).len(), 1);
-        let many: String = (0..200).map(|i| format!("cmd{} -x  # Does thing number {}\n", i, i)).collect();
-        assert_eq!(extract(&fenced("bash", &many), &v(), None).len(), MAX_PAIRS);
+    fn options_and_notation_are_not_typed_commands_but_programs_and_scripts_are() {
+        for c in ["-l", "--show", "conv=", "[a-zA-Z]{2,}", "*.log", "/var/", "/etc/passwd", "2>&1", "$0"] {
+            assert!(!is_typed_command(c), "{:?} is notation, not a command", c);
+        }
+        for c in ["wc -l", "sudo apt update", "./run.sh", "/opt/tools/scan.sh", "!!", ":noh"] {
+            assert!(is_typed_command(c), "{:?} is typed at a prompt", c);
+        }
     }
 }

@@ -56,7 +56,6 @@ pub enum Change {
     Favorite { id: i64, prev: bool, next: bool },
 }
 
-pub   crate 
 /// A batch of changes that undo/redo treat as a single step, so `:g/pat/d`
 /// deleting 40 entries is one `u` away from coming back.
 pub struct UndoGroup {
@@ -1323,7 +1322,7 @@ impl App {
     }
 
     fn cmd_import(&mut self, path: &str) -> Result<()> {
-        let opts = ImportOptions { dry_run: false, flagged_only: false, extra_tags: vec![], per_command: false };
+        let opts = ImportOptions { dry_run: false, flagged_only: false, extra_tags: vec![] };
         match import::import_markdown(&mut self.db, Path::new(path), &opts) {
             Ok(s) => {
                 self.reload()?;
