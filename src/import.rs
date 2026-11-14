@@ -38,6 +38,7 @@ use crate::{
     mdscan::{self, HeadKind},
     models::{fenced_blocks_lang, Category, NewEntry, Source},
     pairs::{self, BlockKind},
+    util,
 };
 
 // The top-level banners -> short slug used as the primary tag / context.
@@ -367,7 +368,13 @@ fn slug(s: &str, max: usize) -> String {
             cut.truncate(pos); // trim to a word boundary, not mid-word
         }
     }
-    cut.iter().collect::<String>().trim_matches('-').to_string()
+    let mut words: Vec<String> = cut.iter().collect::<String>().split('-').filter(|w| !w.is_empty()).map(str::to_string).collect();
+    // "text-sorting-and" reads as a typo: a cut phrase must not end on a joining word
+    const DANGLING: &[&str] = &["and", "or", "but", "the", "a", "an", "of", "to", "for", "with", "in", "on", "at", "by", "vs", "you", "youll", "your", "youre", "its", "is", "are"];
+    while words.len() > 1 && words.last().is_some_and(|w| DANGLING.contains(&w.as_str())) {
+        words.pop();
+    }
+    words.join("-")
 }
 
 /// Blank lines, horizontal rules (`---`) and banner rules (`# =====`) at either
@@ -375,7 +382,9 @@ fn slug(s: &str, max: usize) -> String {
 fn strip_decor(body: &str) -> String {
     let decor = |l: &str| {
         let t = l.trim();
-        t.is_empty() || (t.len() >= 3 && t.chars().all(|c| matches!(c, '-' | '*' | '_' | '=' | '#' | '~' | ' ')))
+        t.is_empty()
+            || (t.len() >= 2 && t.chars().all(|c| matches!(c, '-' | '*' | '_' | '=' | '#' | '~' | ' ')))
+            || (t.starts_with("![[") && t.ends_with("]]")) // an Obsidian embed of another file
     };
     let lines: Vec<&str> = body.lines().collect();
     let start = lines.iter().position(|l| !decor(l)).unwrap_or(lines.len());
@@ -555,9 +564,42 @@ fn flush_group(group: &mut Vec<&str>, groups: &mut Vec<String>) {
     group.clear();
 }
 
+/// The one command to put on the clipboard from a block of them. A cheat sheet
+/// (`uniq file.txt` / `# -c: count` / `uniq -c file.txt` …) gives its first
+/// command, without the aligned `# explanation` after it; a script — a run of
+/// lines tied together by `\`, a heredoc, a loop or indentation — stays whole.
+fn first_command(block: &str) -> String {
+    let lines: Vec<&str> = block.lines().collect();
+    let is_comment = |l: &str| l.trim_start().starts_with('#') && !l.trim_start().starts_with("#!");
+    let Some(start) = lines.iter().position(|l| !l.trim().is_empty() && !is_comment(l)) else {
+        return block.trim().to_string();
+    };
+    let para: Vec<&str> =
+        lines[start..].iter().copied().take_while(|l| !l.trim().is_empty() && !is_comment(l)).collect();
+    const SCRIPT_WORDS: &[&str] = &["for", "while", "until", "if", "case", "function", "do", "then", "select"];
+    let script = para.len() > 1
+        && para.iter().any(|l| {
+            let t = l.trim_end();
+            let first = t.split_whitespace().next().unwrap_or("");
+            t.ends_with('\\')
+                || t.ends_with('{')
+                || t.ends_with('|')
+                || t.ends_with("&&")
+                || t.contains("<<")
+                || l.starts_with([' ', '\t'])
+                || SCRIPT_WORDS.contains(&first)
+        });
+    if script {
+        return para.join("\n");
+    }
+    let line = para[0].strip_prefix("$ ").unwrap_or(para[0]);
+    util::strip_trailing_comment(line).to_string()
+}
+
 fn analyze(body: &str, vocab: &Vocab, keys_tool: Option<&str>) -> Analysis {
     let mut a = Analysis::default();
     let mut blocks: Vec<String> = Vec::new();
+    let mut first_block = String::new();
 
     for (lang, block) in fenced_blocks_lang(body) {
         let text = block.trim_matches('\n');
@@ -591,6 +633,9 @@ fn analyze(body: &str, vocab: &Vocab, keys_tool: Option<&str>) -> Analysis {
             a.cmd_lines += text.lines().filter(|l| is_key_line(l)).count();
         }
         a.fenced_cmd = true;
+        if blocks.is_empty() {
+            first_block = if kind == BlockKind::Shell { first_command(text) } else { text.to_string() };
+        }
         blocks.push(text.to_string());
     }
 
@@ -643,11 +688,13 @@ fn analyze(body: &str, vocab: &Vocab, keys_tool: Option<&str>) -> Analysis {
     a.danger = blocks.iter().chain(groups.iter()).any(|c| danger_reason(c).is_some())
         || inline.iter().any(|p| danger_reason(&p.command).is_some());
     a.command = if a.fenced_cmd {
-        blocks.into_iter().next().unwrap_or_default()
+        first_block
     } else if let Some(g) = groups.into_iter().next() {
-        g
+        first_command(&g)
     } else {
-        inline.iter().take(12).map(|p| p.command.as_str()).collect::<Vec<_>>().join("\n")
+        // a key table is copied whole; a list of shell commands gives its first
+        let n = if keys_tool.is_some() { 12 } else { 1 };
+        inline.iter().take(n).map(|p| p.command.as_str()).collect::<Vec<_>>().join("\n")
     };
     a
 }
@@ -855,7 +902,33 @@ fn drop_repeats(drafts: &mut Vec<Draft>, report: &mut Report) {
     let mut seen: HashSet<(String, String, Vec<String>)> = HashSet::new();
     let before = drafts.len();
     drafts.retain(|d| seen.insert((d.title.to_lowercase(), d.entry.content.clone(), d.ancestors.clone())));
+    // The same cheat sheet pasted twice, with a different sign-off line under it
+    // ("Keep this handy!", an embed): same title and same code is the same entry.
+    let mut seen_code: HashSet<(String, String)> = HashSet::new();
+    drafts.retain(|d| match code_only(&d.entry.content) {
+        Some(code) => seen_code.insert((d.title.to_lowercase(), code)),
+        None => true,
+    });
     report.repeats = before - drafts.len();
+}
+
+/// The fenced code of a body that is essentially only code (a few lines of text
+/// around it at most); `None` for anything with real prose, which makes it its own entry.
+fn code_only(body: &str) -> Option<String> {
+    let blocks = fenced_blocks_lang(body);
+    if blocks.is_empty() {
+        return None;
+    }
+    let mut in_code = false;
+    let mut prose = 0;
+    for l in body.lines() {
+        if l.trim_start().starts_with("```") {
+            in_code = !in_code;
+        } else if !in_code {
+            prose += prose_weight(l);
+        }
+    }
+    (prose <= 3).then(|| blocks.into_iter().map(|(_, b)| b.trim().to_string()).collect::<Vec<_>>().join("\n\n"))
 }
 
 /// `vim` / `tmux` / `emacs` for a word naming one of those keys tools.
@@ -1016,11 +1089,12 @@ fn plan(text: &str, opts: &ImportOptions) -> Plan {
         if !major.is_empty() {
             tags.push(major.to_string());
         }
-        if let Some(sec) = section_title(&nodes, i) {
-            tags.push(slug(&sec, 24));
+        // the section an entry sits in; an entry that *is* the section has its title already
+        if let Some(sec) = section_title(&nodes, i).filter(|s| *s != n.title) {
+            tags.push(slug(&sec, 32));
         }
         if let Some(doc) = printed {
-            tags.push(slug(doc, 24));
+            tags.push(slug(doc, 32));
         }
         if raw_up.contains("CRITICAL") {
             tags.push("critical".into());
@@ -1506,7 +1580,7 @@ mod tests {
         let md = "## Search options\n\n- `:set hlsearch` - Highlight search results\n- `:set incsearch` - Incremental search\n- `:noh` - Clear highlighting\n";
         let e = &entries(md)[0];
         assert_eq!(e.category, Category::Command);
-        assert_eq!(e.command, ":set hlsearch\n:set incsearch\n:noh");
+        assert_eq!(e.command, ":set hlsearch", "a list of commands copies its first, like a cheat-sheet block");
     }
 
     #[test]
@@ -1629,5 +1703,46 @@ mod tests {
         let r = plan(LS_CARD, &opts()).report;
         assert_eq!((r.tools, r.profiles), (1, 1));
         assert!(r.render().contains("program profiles"), "{}", r.render());
+    }
+
+    // ── what gets copied, tags, repeats ──
+
+    #[test]
+    fn a_cheat_sheet_block_copies_its_first_command_not_the_whole_sheet() {
+        let block = "uniq file.txt\n# uniq: report or omit repeated lines\n\nuniq -c file.txt\n# -c: count";
+        assert_eq!(first_command(block), "uniq file.txt");
+        assert_eq!(first_command("# Count unique lines\nsort file | uniq -c\n\n# dupes\nsort file | uniq -d"), "sort file | uniq -c");
+        assert_eq!(first_command("$ cut -d: -f1 /etc/passwd    # usernames\nawk '{print $1}' f  # col"), "cut -d: -f1 /etc/passwd");
+    }
+
+    #[test]
+    fn a_script_block_is_copied_whole() {
+        let cont = "docker run \\\n  -p 80:80 \\\n  nginx";
+        assert_eq!(first_command(cont), cont);
+        let lp = "for h in a b; do\n  ping -c1 $h\ndone";
+        assert_eq!(first_command(lp), lp);
+        let here = "cat <<EOF > f\nhello\nEOF";
+        assert_eq!(first_command(here), here);
+    }
+
+    #[test]
+    fn cut_tag_slugs_do_not_end_on_a_joining_word() {
+        assert_eq!(slug("Remove duplicates but keep order", 24), "remove-duplicates");
+        assert_eq!(slug("One-liners you'll actually use", 20), "one-liners");
+        assert_eq!(slug("Text Sorting and Uniqueness", 32), "text-sorting-and-uniqueness");
+    }
+
+    #[test]
+    fn a_top_level_section_is_not_tagged_with_its_own_title() {
+        let es = entries("## Remove duplicates but keep order\n\n```bash\nawk '!seen[$0]++' file\n```\n");
+        assert!(es[0].tags.iter().all(|t| !t.starts_with("remove-duplicates")), "{:?}", es[0].tags);
+    }
+
+    #[test]
+    fn the_same_cheat_sheet_with_a_different_sign_off_is_one_entry() {
+        let md = "# A\n\n## Pipe Tricks\n\n```bash\nsort file | uniq -c\n```\n\nKeep this handy!\n\n\
+                  # B\n\n## Pipe Tricks\n\n```bash\nsort file | uniq -c\n```\n\n--\n![[notes 1.txt]]\n";
+        let es = entries(md);
+        assert_eq!(es.iter().filter(|e| e.title.starts_with("Pipe Tricks")).count(), 1, "{:?}", titles(md));
     }
 }

@@ -171,6 +171,50 @@ fn highlight(text: &str, terms: &[String], p: Paint) -> String {
     out
 }
 
+/// Lines of a command `show` prints before saying how many more there are.
+const SHOW_CMD_LINES: usize = 6;
+/// Opening lines of an entry's text.
+const SHOW_TEXT_LINES: usize = 4;
+/// Further lines that contain a searched word.
+const SHOW_MATCH_LINES: usize = 3;
+
+/// Print `text` indented, at most `max` lines then a count of the rest; returns the
+/// (trimmed) lines it printed.
+fn write_lines(out: &mut impl Write, text: &str, max: usize, p: Paint, style: impl Fn(&str) -> String) -> Result<Vec<String>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut printed = Vec::new();
+    for l in lines.iter().take(max) {
+        writeln!(out, "  {}", style(l))?;
+        printed.push(l.trim().to_string());
+    }
+    if lines.len() > max {
+        writeln!(out, "  {}", p.dim(&format!("… {} more lines", lines.len() - max)))?;
+    }
+    Ok(printed)
+}
+
+/// For a `# comment` line in a cheat sheet, the command it explains: the one above it
+/// (`uniq -d f` / `# -d: duplicates only`), or below it when the comment opens a
+/// paragraph (`# Show only duplicates` / `sort f | uniq -d`). `None` for any other line.
+fn described_command<'a>(lines: &[&'a str], i: usize) -> Option<&'a str> {
+    let is_comment = |l: &str| l.starts_with('#') && !l.starts_with("#!");
+    if !is_comment(lines[i]) {
+        return None;
+    }
+    let code = |l: &&str| !l.is_empty() && !is_comment(l) && !l.starts_with("```");
+    let above = lines[..i].iter().rev().take_while(|l| !l.is_empty()).find(|l| !is_comment(l));
+    match above {
+        Some(l) if code(l) => Some(*l),
+        _ => lines[i + 1..].iter().take_while(|l| !l.is_empty()).find(|l| !is_comment(l)).filter(|l| code(l)).copied(),
+    }
+}
+
+/// Fences, rules, blank lines and bare `# comment` labels: nothing to read in a listing.
+fn is_noise_line(l: &str) -> bool {
+    let t = l.trim();
+    t.is_empty() || t.starts_with("```") || !t.chars().any(char::is_alphanumeric)
+}
+
 fn write_entry(out: &mut impl Write, e: &Entry, p: Paint, terms: &[String]) -> Result<()> {
     // Built from independently self-contained (open…reset) ANSI spans rather
     // than one wrapped in another — a reset inside a reset would cut the
@@ -184,12 +228,43 @@ fn write_entry(out: &mut impl Write, e: &Entry, p: Paint, terms: &[String]) -> R
         format!("{} {} › {}{}", badge, e.tool, title, star)
     };
     writeln!(out, "{}", head)?;
-    if e.has_command() {
-        writeln!(out, "  {}", p.green(&e.primary_command()))?;
+    let cmd = e.primary_command();
+    let body = e.content.trim();
+    // A list of commands gathered from the text (`- `:sort u` - sort and dedupe`) reads
+    // better as that text, which says what each one does.
+    let listed = cmd.lines().count() > 1 && cmd.lines().all(|l| body.contains(l.trim()));
+    // every line already on screen, so a matching line is never printed twice
+    let mut shown: Vec<String> = Vec::new();
+    if !cmd.is_empty() && !listed {
+        shown.extend(write_lines(out, &cmd, SHOW_CMD_LINES, p, |l| p.green(l))?);
     }
-    if !e.content.trim().is_empty() && (!e.has_command() || !e.content.contains(e.command.trim())) {
-        for line in e.content.lines().take(6) {
-            writeln!(out, "  {}", p.dim(line))?;
+    if !body.is_empty() && (cmd.is_empty() || listed || !body.contains(cmd.trim())) {
+        // text the command doesn't already show: its opening lines
+        let lines: Vec<&str> = body.lines().filter(|l| !is_noise_line(l)).collect();
+        shown.extend(write_lines(out, &lines.join("\n"), SHOW_TEXT_LINES, p, |l| p.dim(l))?);
+    }
+    // where the searched words are, when that isn't the part already shown
+    if !terms.is_empty() {
+        let lines: Vec<&str> = body.lines().map(str::trim).collect();
+        let mut seen: Vec<String> = Vec::new();
+        for (i, l) in lines.iter().enumerate() {
+            if seen.len() == SHOW_MATCH_LINES {
+                break;
+            }
+            let low = l.to_lowercase();
+            let bare = util::strip_trailing_comment(l);
+            if is_noise_line(l) || shown.iter().any(|s| s == bare) || !terms.iter().any(|t| low.contains(t.as_str())) {
+                continue;
+            }
+            let text = match described_command(&lines, i) {
+                Some(c) => format!("{}  {}", c, l),
+                None => l.to_string(),
+            };
+            if seen.contains(&text) {
+                continue;
+            }
+            writeln!(out, "  {} {}", p.dim("…"), highlight(&util::truncate(&text, 110), terms, p))?;
+            seen.push(text);
         }
     }
     let mut meta = Vec::new();
